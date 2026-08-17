@@ -1,0 +1,81 @@
+EPIS -> Mi Band bildirim kurulumu
+==================================
+
+EPIS yazdiginda bileklige "EPIS" baslikli bildirim gider (Gadgetbridge uzerinden).
+
+ONKOSULLAR
+----------
+- Telefonda Gadgetbridge + Mi Band bagli
+- PC'de ADB (Android Platform Tools)
+- Telefon ve PC ayni Wi-Fi'da (kabuklu veya kablosuz ADB)
+
+1) GADGETBRIDGE AYARLARI (telefon)
+-----------------------------------
+- Gadgetbridge acik, Mi Band bagli
+- Telefon bildirimleri Mi Band'e yansisin (varsayilan)
+- (Opsiyonel) Intent API -> Debug Actions: acik — yedek yontem icin
+
+2) TELEFONDA ADB (Wi-Fi)
+------------------------
+Telefonda: Gelistirici secenekleri -> USB hata ayiklama AC
+Ilk kez USB ile baglan:
+  adb devices
+  adb tcpip 5555
+  adb connect TELEFON_IP:5555
+
+Ornek:
+  adb connect 192.168.1.100:5555
+  adb devices
+
+3) keys.env
+-----------
+Layer-3/keys.env dosyasina ekle:
+
+BAND_NOTIFICATIONS=true
+BAND_NOTIFY_MODE=adb
+ADB_DEVICE=192.168.1.100:5555
+GADGETBRIDGE_PACKAGE=nodomain.freeyourgadget.gadgetbridge
+
+(IP'yi kendi telefonunla degistir)
+
+4) TEST
+-------
+  .\scripts\test_band_notify.ps1
+
+Bileklikte "EPIS" gonderen bir bildirim gormelisin.
+
+BILDIRIM STILI
+--------------
+shell (varsayilan, onerilen):
+  Telefona gercek bildirim. Baslik "EPIS", uygulama adi "Shell" — Android
+  guvenligi nedeniyle Shell ikonu degistirilemez.
+
+epis (istege bagli):
+  keys.env: BAND_NOTIFY_STYLE=epis
+  Gadgetbridge -> Ayarlar -> Gelistirici -> Intent API -> Debug Actions: AC
+  Bilekliğe gonderen "EPIS" gorunur; calismazsa shell yedegi devreye girer.
+
+OZEL IKON (ileride):
+  MacroDroid / Tasker ile HTTP webhook + ozel ikonlu bildirim.
+  BAND_NOTIFY_MODE=http + BAND_NOTIFY_URL=...
+  Detay: scripts/kurulum_band_ikon.txt (opsiyonel)
+
+5) NE ZAMAN BILDIRIM GELIR?
+---------------------------
+- Kairos proaktif mesaj (check-in, nabiz vb.) -> quiet hours disinda
+- Web UI'da EPIS cevap yazdiginda -> her zaman
+
+SORUN GIDERME
+-------------
+- adb devices bos -> Wi-Fi ADB yeniden bagla
+- Bildirim yok -> Gadgetbridge acik mi, band bagli mi?
+- Debug Commands kapali -> Intent API ayarini kontrol et
+
+ALTERNATIF: HTTP (Tasker / MacroDroid)
+--------------------------------------
+BAND_NOTIFY_MODE=http
+BAND_NOTIFY_URL=http://TELEFON_IP:8088/epis-band
+
+Telefonda webhook alip su intent'i gonder:
+  action: nodomain.freeyourgadget.gadgetbridge.command.DEBUG_SEND_NOTIFICATION
+  extras: sender=EPIS, subject=EPIS, body=<mesaj>

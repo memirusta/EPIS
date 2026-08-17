@@ -1,0 +1,44 @@
+{
+  "schedule": {
+    "wake_time": "07:30",
+    "end_of_day_time": "22:30",
+    "sleep_time": "23:30"
+  },
+  "active_hours": {
+    "start": "08:00",
+    "end": "22:00"
+  },
+  "stress_threshold_bpm": 100,
+  "screen_limits": {
+    "youtube_minutes": 120,
+    "reels_minutes": 45,
+    "tiktok_minutes": 45
+  },
+  "screen_monitoring": {
+    "enabled": false,
+    "note": "Opt-in only."
+  },
+  "phone_monitoring": {
+    "enabled": false,
+    "note": "Opt-in only."
+  },
+  "note": "Safe public defaults. Customize locally.",
+  "proactive": {
+    "instant_push": false,
+    "channel": "ui",
+    "idle_minutes": 60,
+    "idle_check_interval_minutes": 10,
+    "quiet_hours_enabled": true,
+    "quiet_start": "23:00",
+    "quiet_end": "07:00",
+    "cooldowns": {
+      "idle": 120,
+      "anomaly": 60,
+      "morning": 720,
+      "intervention": 120,
+      "pre_sleep": 720,
+      "end_of_day": 720
+    }
+  },
+  "last_updated": null
+}

@@ -1,0 +1,28 @@
+EPIS — Telefon ekran izleme (ADB)
+==================================
+
+Ne yapar?
+  Kairos calisirken telefondaki on plandaki uygulamayi Wi-Fi ADB ile okur.
+  YouTube, Instagram ve TikTok sureleri gunluk limitlere dahil edilir (PC ile toplanir).
+  Ekran goruntusu veya icerik okunmaz — sadece paket adi.
+
+On kosullar (zaten kurulu olmali):
+  1. Telefonda Gelistirici secenekleri -> Kablosuz hata ayiklama acik
+  2. PC'de: adb connect 192.168.1.100:5555  (IP seninkine gore)
+  3. Mi Band bildirimleri icin kullandigin ADB_PATH / ADB_DEVICE ayarlari
+
+keys.env'e ekle:
+  PHONE_MONITORING=true
+
+Test:
+  powershell -File scripts\test_phone_screen.ps1
+
+Kairos ile birlikte:
+  1. start_qwen.ps1
+  2. start_epis_ui.ps1
+  3. start_kairos.ps1
+
+Notlar:
+  - Telefon uyku modunda veya bildirim paneli acikken sure sayilmaz.
+  - ADB baglantisi koparsa PC ekran izleme devam eder; telefon verisi durur.
+  - Instagram tum kullanim "reels" limitine sayilir (Reels sekmesi ayirt edilemez).

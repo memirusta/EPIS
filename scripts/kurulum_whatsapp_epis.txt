@@ -1,0 +1,52 @@
+# EPIS ayri WhatsApp kisisi kurulumu
+# ====================================
+# WhatsApp'ta "sanal kisi" yoktur. EPIS ayri bir NUMARA olmali.
+# Rehberde EPIS diye kaydedersin; mesajlar o sohbetten gelir.
+
+ADIM 1 -- Ikinci numara
+  Secenekler:
+  - Ikinci SIM / eSIM (en temiz)
+  - Eski telefon + yeni hat
+  - WhatsApp Business ikinci hat (bazi operatorler)
+
+ADIM 2 -- EPIS WhatsApp hesabi
+  - O numarayla WhatsApp veya WhatsApp Business kur
+  - Profil adi: EPIS
+  - (Business ise) Aciklama: Kisisel AI
+
+ADIM 3 -- keys.env (zaten ayarli olmali)
+  MY_WHATSAPP_NUMBER=905XXXXXXXXX     <- SENIN numaran (kullanıcı)
+  WHATSAPP_MODE=epis_account
+
+ADIM 4 -- Eski oturumu sil (kullanıcı hesabiyla baglandiysa)
+  D:\EPIS\scripts\reset_whatsapp_auth.ps1
+
+ADIM 5 -- Bridge'i EPIS telefonundan bagla
+  Terminal 1: D:\EPIS\scripts\start_webhook.ps1
+  Terminal 2: D:\EPIS\scripts\start_whatsapp_bridge.ps1
+  QR kodu EPIS'in telefonundan tara (kullanıcının telefonundan DEGIL)
+
+  Terminalde gormelisin:
+    EPIS hesap numarasi : 90XXXXXXXXX  (yeni numara)
+    kullanıcı (hedef/filtre) : 905XXXXXXXXX
+
+  Ayni numara uyarisi cikarsa yanlis telefondan QR taramissin.
+
+ADIM 6 -- Rehber
+  - EPIS numarasini telefonuna "EPIS" diye kaydet
+  - Artik KENDINE degil, EPIS kisisine yaz
+
+ADIM 7 -- Test
+  EPIS sohbetine: hey epis
+  D:\EPIS\scripts\test_whatsapp.ps1
+  D:\EPIS\scripts\test_instant_push.ps1 -Type anomaly
+
+CALISAN SERVISLER
+  start_qwen.ps1
+  start_kairos.ps1
+  start_webhook.ps1
+  start_whatsapp_bridge.ps1
+
+NOT
+  Push mesajlari da EPIS kisisinden gelir (kullanıcıya gonderilir).
+  self_chat moduna donmek icin: WHATSAPP_MODE=self_chat + reset + kullanıcı QR

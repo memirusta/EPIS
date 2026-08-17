@@ -1,0 +1,36 @@
+# EPIS -- PC'de yerel sunucu (Hetzner gelene kadar)
+# Her servis ayri terminal penceresinde calistirilir.
+
+$Root = Split-Path -Parent $PSScriptRoot
+$Src  = Join-Path $Root "Layer-2\src"
+
+Write-Host ""
+Write-Host "EPIS Yerel Kurulum" -ForegroundColor Cyan
+Write-Host "==================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Asagidaki pencereleri SIRAYLA ac (her biri ayri PowerShell):" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  0) Qwen (Ollama) -- Layer-1 icin once bunu ac:" -ForegroundColor Green
+Write-Host "     D:\EPIS\scripts\start_qwen.ps1"
+Write-Host ""
+Write-Host "  1) EPIS Web arayuzu (ONERILEN -- tarayici):" -ForegroundColor Green
+Write-Host "     D:\EPIS\scripts\start_epis_ui.ps1"
+Write-Host "     -> http://localhost:8080"
+Write-Host ""
+Write-Host "  2) Kairos (sensorler, anlik push -> UI):" -ForegroundColor Green
+Write-Host "     D:\EPIS\scripts\start_kairos.ps1"
+Write-Host ""
+Write-Host "  3) EPIS terminal sohbet (istege bagli):" -ForegroundColor Green
+Write-Host "     D:\EPIS\scripts\start_chat.ps1"
+Write-Host ""
+Write-Host "  4) WhatsApp (istege bagli, ikinci hat gerekir):" -ForegroundColor Green
+Write-Host "     D:\EPIS\scripts\start_webhook.ps1          (once)"
+Write-Host "     D:\EPIS\scripts\start_whatsapp_bridge.ps1  (QR tara)"
+Write-Host "     D:\EPIS\scripts\test_whatsapp.ps1          (durum kontrol)"
+Write-Host ""
+Write-Host "Notlar:" -ForegroundColor Yellow
+Write-Host "  - Ana arayuz: http://localhost:8080 (start_epis_ui.ps1)"
+Write-Host "  - Kairos push: PROACTIVE_CHANNEL=ui (keys.env)"
+Write-Host "  - MacroDroid export + Syncthing acik kalsin"
+Write-Host "  - Fine-tune sonrasi: QWEN_MODEL=qwen-epis (RunPod -> Ollama import)"
+Write-Host ""

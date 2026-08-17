@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EPIS</title>
+  <style>
+    :root {
+      --bg: #0d0f14;
+      --panel: #151922;
+      --sidebar: #11141c;
+      --epis: #1e2a3a;
+      --user: #2d4a3e;
+      --text: #e8eaed;
+      --muted: #8b939e;
+      --accent: #6eb5ff;
+      --proactive: #ffb347;
+      --border: #252a35;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100dvh;
+      overflow: hidden;
+    }
+    .app { display: flex; height: 100dvh; }
+    #sidebar {
+      width: 260px;
+      min-width: 200px;
+      background: var(--sidebar);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+    }
+    .sidebar-head {
+      padding: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .sidebar-head button {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--panel);
+      color: var(--text);
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .sidebar-head button:hover { border-color: var(--accent); color: var(--accent); }
+    #sessionList {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+    }
+    .session-item {
+      padding: 10px 12px;
+      border-radius: 10px;
+      cursor: pointer;
+      margin-bottom: 4px;
+      border: 1px solid transparent;
+    }
+    .session-item:hover { background: var(--panel); }
+    .session-item.active {
+      background: var(--panel);
+      border-color: var(--accent);
+    }
+    .session-item .title {
+      font-size: 0.9rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .session-item .meta {
+      font-size: 0.7rem;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+    header {
+      padding: 12px 16px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header .dot { width: 10px; height: 10px; border-radius: 50%; background: #444; }
+    header .dot.on { background: #4ade80; }
+    header h1 { margin: 0; font-size: 1.05rem; font-weight: 600; }
+    header small { color: var(--muted); display: block; font-size: 0.72rem; }
+    .toggle-side {
+      display: none;
+      background: none;
+      border: none;
+      color: var(--text);
+      font-size: 1.2rem;
+      cursor: pointer;
+      padding: 4px 8px;
+    }
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .history-banner {
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.8rem;
+      padding: 8px;
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      margin-bottom: 8px;
+    }
+    .msg {
+      max-width: 85%;
+      padding: 10px 14px;
+      border-radius: 14px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .msg.epis { background: var(--epis); align-self: flex-start; border-bottom-left-radius: 4px; }
+    .msg.user { background: var(--user); align-self: flex-end; border-bottom-right-radius: 4px; }
+    .msg.proactive { border-left: 3px solid var(--proactive); }
+    .msg .tag { font-size: 0.7rem; color: var(--proactive); margin-bottom: 4px; }
+    .typing { color: var(--muted); font-size: 0.85rem; padding: 0 16px 8px; min-height: 1.2em; }
+    form {
+      display: flex;
+      gap: 8px;
+      padding: 12px 16px;
+      background: var(--panel);
+      border-top: 1px solid var(--border);
+    }
+    input {
+      flex: 1;
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid #333;
+      background: #0d0f14;
+      color: var(--text);
+      font-size: 1rem;
+    }
+    form button {
+      padding: 12px 18px;
+      border: none;
+      border-radius: 10px;
+      background: var(--accent);
+      color: #0d0f14;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    form button:disabled { opacity: 0.5; cursor: wait; }
+    @media (max-width: 720px) {
+      #sidebar {
+        position: fixed;
+        left: 0; top: 0; bottom: 0;
+        z-index: 20;
+        transform: translateX(-100%);
+        transition: transform 0.2s;
+      }
+      #sidebar.open { transform: translateX(0); }
+      .toggle-side { display: block; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside id="sidebar">
+      <div class="sidebar-head">
+        <button type="button" id="newChatBtn">+ Yeni sohbet</button>
+      </div>
+      <div id="sessionList"></div>
+    </aside>
+    <div class="main">
+      <header>
+        <button type="button" class="toggle-side" id="toggleSide" title="Sohbetler">☰</button>
+        <div class="dot" id="statusDot"></div>
+        <div style="flex:1">
+          <h1 id="chatTitle">EPIS</h1>
+          <small id="statusText">Baglaniyor...</small>
+        </div>
+      </header>
+      <div id="messages"></div>
+      <div class="typing" id="typing"></div>
+      <form id="form">
+        <input id="input" autocomplete="off" placeholder="EPIS'e yaz..." autofocus />
+        <button type="submit" id="sendBtn">Gonder</button>
+      </form>
+    </div>
+  </div>
+  <script>
+    const messagesEl = document.getElementById("messages");
+    const sessionListEl = document.getElementById("sessionList");
+    const input = document.getElementById("input");
+    const form = document.getElementById("form");
+    const typing = document.getElementById("typing");
+    const sendBtn = document.getElementById("sendBtn");
+    const statusDot = document.getElementById("statusDot");
+    const statusText = document.getElementById("statusText");
+    const chatTitle = document.getElementById("chatTitle");
+    const sidebar = document.getElementById("sidebar");
+    const newChatBtn = document.getElementById("newChatBtn");
+    const toggleSide = document.getElementById("toggleSide");
+
+    let activeSessionId = "live";
+    let viewingHistory = false;
+    let tabCloseSent = false;
+
+    /*__EPIS_UI_SECRET__*/
+    const UI_SECRET = window.__EPIS_UI_SECRET__ || "";
+
+    function apiHeaders(extra = {}) {
+      const h = { ...extra };
+      if (UI_SECRET) h["X-EPIS-UI-Secret"] = UI_SECRET;
+      return h;
+    }
+
+    async function apiFetch(url, opts = {}) {
+      const headers = apiHeaders(opts.headers || {});
+      return fetch(url, { ...opts, headers });
+    }
+
+    function saveSessionOnTabClose() {
+      if (tabCloseSent || viewingHistory) return;
+      tabCloseSent = true;
+      apiFetch("/api/sessions/close", { method: "POST", keepalive: true }).catch(() => {});
+    }
+
+    window.addEventListener("pagehide", (e) => {
+      if (e.persisted) return;
+      saveSessionOnTabClose();
+    });
+
+    const TRIGGER_LABELS = {
+      idle: "Check-in", anomaly: "Nabız", morning: "Sabah",
+      end_of_day: "Akşam", pre_sleep: "Uyku", intervention: "Ekran",
+      deadline: "Deadline", drift: "Rutin", nightly_error: "Sistem",
+    };
+
+    function proactiveTag(t) { return TRIGGER_LABELS[t] || "EPIS"; }
+
+    function fmtTime(ts) {
+      if (!ts) return "";
+      try {
+        const d = new Date(ts);
+        return d.toLocaleDateString("tr-TR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+      } catch { return ts.slice(0, 16).replace("T", " "); }
+    }
+
+    function clearMessages() { messagesEl.innerHTML = ""; }
+
+    function renderMessages(msgs, opts = {}) {
+      clearMessages();
+      if (opts.history) {
+        const b = document.createElement("div");
+        b.className = "history-banner";
+        b.textContent = "Eski sohbet — salt okunur. Yazmak icin Yeni sohbet.";
+        messagesEl.appendChild(b);
+      }
+      for (const m of msgs) {
+        addMsg(m.text, m.role === "user" ? "user" : "epis", {}, false);
+      }
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function addMsg(text, who, opts = {}, scroll = true) {
+      const div = document.createElement("div");
+      div.className = "msg " + who + (opts.proactive ? " proactive" : "");
+      if (opts.tag) {
+        const t = document.createElement("div");
+        t.className = "tag";
+        t.textContent = opts.tag;
+        div.appendChild(t);
+      }
+      const body = document.createElement("div");
+      body.textContent = text;
+      div.appendChild(body);
+      messagesEl.appendChild(div);
+      if (scroll) messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    async function loadSessions() {
+      try {
+        const r = await apiFetch("/api/sessions");
+        const d = await r.json();
+        sessionListEl.innerHTML = "";
+        for (const s of d.sessions || []) {
+          const el = document.createElement("div");
+          el.className = "session-item" + (String(s.id) === String(activeSessionId) ? " active" : "");
+          el.dataset.id = s.id;
+          el.innerHTML = `<div class="title">${escapeHtml(s.title || "Sohbet")}</div>
+            <div class="meta">${fmtTime(s.timestamp)} · ${s.count || 0} mesaj</div>`;
+          el.addEventListener("click", () => openSession(s.id, s.title));
+          sessionListEl.appendChild(el);
+        }
+      } catch (e) {
+        console.warn("sessions", e);
+      }
+    }
+
+    function escapeHtml(s) {
+      return (s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    }
+
+    async function openSession(id, title) {
+      activeSessionId = String(id);
+      viewingHistory = id !== "live";
+      chatTitle.textContent = title || "EPIS";
+      input.disabled = viewingHistory;
+      sendBtn.disabled = viewingHistory;
+      input.placeholder = viewingHistory ? "Eski sohbet — yeni sohbet ac" : "EPIS'e yaz...";
+      document.querySelectorAll(".session-item").forEach(el => {
+        el.classList.toggle("active", el.dataset.id === String(id));
+      });
+      sidebar.classList.remove("open");
+      try {
+        const r = await apiFetch("/api/sessions/" + encodeURIComponent(id));
+        const d = await r.json();
+        renderMessages(d.messages || [], { history: viewingHistory });
+      } catch (e) {
+        addMsg("Sohbet yuklenemedi: " + e.message, "epis");
+      }
+    }
+
+    async function startNewChat() {
+      try {
+        await apiFetch("/api/sessions/new", { method: "POST" });
+      } catch (_) {}
+      activeSessionId = "live";
+      viewingHistory = false;
+      tabCloseSent = false;
+      chatTitle.textContent = "EPIS";
+      input.disabled = false;
+      sendBtn.disabled = false;
+      input.placeholder = "EPIS'e yaz...";
+      clearMessages();
+      await loadSessions();
+      input.focus();
+      sidebar.classList.remove("open");
+    }
+
+    async function refreshStatus() {
+      try {
+        const r = await apiFetch("/api/status");
+        const d = await r.json();
+        if (d.ready) {
+          statusDot.classList.add("on");
+          statusText.textContent = `${d.model || "EPIS"} (${d.backend || ""})`;
+        } else {
+          statusText.textContent = "EPIS hazir degil (Ollama acik mi?)";
+        }
+      } catch {
+        statusText.textContent = "Sunucuya ulasilamadi";
+      }
+    }
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (viewingHistory) return;
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = "";
+      addMsg(text, "user");
+      sendBtn.disabled = true;
+      typing.textContent = "EPIS dusunuyor...";
+      try {
+        const r = await apiFetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text }),
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || "Hata");
+        addMsg(d.reply || "...", "epis");
+        await loadSessions();
+      } catch (err) {
+        addMsg("Baglanti hatasi: " + err.message, "epis");
+      } finally {
+        typing.textContent = "";
+        sendBtn.disabled = false;
+        input.focus();
+      }
+    });
+
+    function connectSSE() {
+      const url = UI_SECRET
+        ? "/api/events?token=" + encodeURIComponent(UI_SECRET)
+        : "/api/events";
+      const es = new EventSource(url);
+      es.onmessage = (ev) => {
+        try {
+          const data = JSON.parse(ev.data);
+          if (data.type === "proactive" && !viewingHistory) {
+            addMsg(data.message, "epis", { proactive: true, tag: proactiveTag(data.trigger_type) });
+          } else if (data.type === "typing") {
+            typing.textContent = data.message || "";
+          }
+        } catch (_) {}
+      };
+      es.onerror = () => { es.close(); setTimeout(connectSSE, 3000); };
+    }
+
+    newChatBtn.addEventListener("click", startNewChat);
+    toggleSide.addEventListener("click", () => sidebar.classList.toggle("open"));
+
+    (async function init() {
+      await refreshStatus();
+      await loadSessions();
+      clearMessages();
+      connectSSE();
+    })();
+  </script>
+</body>
+</html>

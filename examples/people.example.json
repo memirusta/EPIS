@@ -1,0 +1,14 @@
+{
+  "people": {
+    "Example User": {
+      "primary": true,
+      "aliases": [],
+      "relation": "self",
+      "notes": "",
+      "last_seen": null
+    }
+  },
+  "places": [],
+  "note": "Private runtime data.",
+  "last_updated": null
+}

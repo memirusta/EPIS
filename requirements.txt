@@ -1,0 +1,12 @@
+google-genai
+anthropic
+openai
+python-dotenv
+schedule
+psutil
+pywin32
+fastapi
+uvicorn[standard]
+requests
+cryptography
+uiautomation

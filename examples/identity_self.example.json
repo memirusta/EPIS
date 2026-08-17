@@ -1,0 +1,18 @@
+{
+  "basic": {
+    "name": "Example User",
+    "age": null,
+    "location": "",
+    "birthday": ""
+  },
+  "story": "",
+  "self_description": "",
+  "values": [],
+  "goals": {
+    "life": [],
+    "current": []
+  },
+  "fears": "",
+  "dreams": "",
+  "last_updated": null
+}

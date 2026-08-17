@@ -1,0 +1,17 @@
+{
+  "system_status": "initialized",
+  "last_update": null,
+  "last_stress_alert": null,
+  "session_active": false,
+  "last_interaction": "",
+  "last_message_at": "",
+  "last_proactive_push_at": "",
+  "last_proactive_trigger": "",
+  "screen_usage_today": {},
+  "screen_usage_pc": {},
+  "screen_usage_phone": {},
+  "screen_active_app": "",
+  "screen_active_title": "",
+  "phone_active_package": null,
+  "screen_updated_at": null
+}

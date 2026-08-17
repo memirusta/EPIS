@@ -1,0 +1,37 @@
+# Secrets / credentials
+Layer-3/keys.env
+Layer-3/epis.key
+.env
+.env.*
+!.env.example
+!Layer-3/keys.env.example
+
+# Private identity / memory / behavioral data
+Layer-1/identity/identity_self.json
+Layer-1/identity/identity_calculated.json
+Layer-1/identity/epis_self.json
+Layer-1/memory/*.json
+Layer-1/memory/*.jsonl
+Layer-1/memory/*.db
+Layer-1/habits/habits.json
+Layer-1/habits/habit_log.json
+GadgetBridge/
+backups/
+logs/
+pending_sync.json
+
+# WhatsApp session/auth data
+whatsapp_bridge/.wwebjs_auth/
+whatsapp_bridge/.wwebjs_cache/
+
+# Dependencies / generated files
+node_modules/
+**/node_modules/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.log
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
