@@ -23,7 +23,10 @@ class PermissionEngine:
     """Small, auditable policy boundary for every dispatched tool call."""
 
     def decide(self, tool, arguments: dict) -> PermissionDecision:
-        risk = RiskClass(tool.risk_class)
+        try:
+            risk = RiskClass(tool.risk_class)
+        except ValueError:
+            return PermissionDecision(False, False, "unknown risk class")
         if risk is RiskClass.GREEN and not tool.confirmation_required:
             return PermissionDecision(True, False, "green tool")
         if risk is RiskClass.YELLOW:

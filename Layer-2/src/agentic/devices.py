@@ -49,6 +49,7 @@ class DeviceRegistry:
             candidate = self.get(preferred_device)
             if candidate and candidate.online and capability in candidate.capabilities:
                 return candidate
+            return None
         return next(
             (d for d in self._devices.values() if d.online and capability in d.capabilities),
             None,
@@ -64,6 +65,8 @@ class DeviceRegistry:
             with open(self.state_path, encoding="utf-8") as handle:
                 for raw in json.load(handle).get("devices", []):
                     raw["capabilities"] = set(raw.get("capabilities", []))
+                    # Disk cache is not evidence of a live connection.
+                    raw["online"] = False
                     self._devices[raw["device_id"]] = Device(**raw)
         except (OSError, ValueError, TypeError):
             # A corrupt availability cache must never prevent a local agent from starting.
@@ -72,7 +75,7 @@ class DeviceRegistry:
     def _save(self) -> None:
         if not self.state_path:
             return
-        os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(self.state_path)), exist_ok=True)
         payload = {"devices": self.list_public()}
         with open(self.state_path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
@@ -90,8 +93,6 @@ class LocalDeviceAgent:
             platform="windows" if os.name == "nt" else os.name,
             capabilities={
                 "system.info", "app.open", "app.close", "audio.volume", "media.play_pause",
-                # Reserved first-class capability: a future trusted Codex integration owns it.
-                "codex.send",
             },
         ))
 

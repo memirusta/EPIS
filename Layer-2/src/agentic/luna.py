@@ -6,6 +6,21 @@ from dataclasses import dataclass, field
 import json
 import os
 from typing import Protocol
+import logging
+
+
+def display_text(text: str) -> str:
+    """Read only the old direct-response envelope; never execute text JSON."""
+    candidate = text.strip()
+    if candidate.startswith("```json\n") and candidate.endswith("```"):
+        candidate = candidate[8:-3].strip()
+    try:
+        value = json.loads(candidate)
+    except (ValueError, TypeError):
+        return text.strip()
+    if isinstance(value, dict) and value.get("type") == "direct" and isinstance(value.get("message"), str):
+        return value["message"].strip()
+    return text.strip()
 
 
 @dataclass(frozen=True)
@@ -69,6 +84,9 @@ class OpenAILunaClient:
             messages=messages,
             tools=tools,
             tool_choice="auto",
+            parallel_tool_calls=False,
+            store=False,
+            max_completion_tokens=2048,
             reasoning_effort=self.reasoning_effort,
         )
         message = response.choices[0].message
@@ -77,9 +95,9 @@ class OpenAILunaClient:
             try:
                 arguments = json.loads(raw_call.function.arguments or "{}")
             except json.JSONDecodeError:
-                arguments = {}
+                arguments = None  # Invalid JSON must fail validation, never execute as an empty call.
             calls.append(ToolCall(raw_call.id, raw_call.function.name, arguments))
-        return LunaReply(text=(message.content or "").strip(), tool_calls=calls)
+        return LunaReply(text=display_text(message.content or ""), tool_calls=calls)
 
 
 class OpenAISolClient:
@@ -103,6 +121,8 @@ class OpenAISolClient:
             response = client.responses.create(
                 model=self.model,
                 reasoning={"effort": self.reasoning_effort},
+                store=False,
+                max_output_tokens=4096,
                 instructions=(
                     "You are Sol, EPIS's specialist analysis engine. Work on the delegated "
                     "task only. Return a concise, rigorous result for Luna to synthesize; do "
@@ -113,7 +133,8 @@ class OpenAISolClient:
             text = self.privacy.deanonymize(response.output_text or "", mapping)
             return {"ok": True, "model_used": self.model, "result": text}
         except Exception as exc:
-            return {"ok": False, "model_used": self.model, "error": f"{type(exc).__name__}: {exc}"}
+            logging.getLogger("EPIS.AGENT").warning("Sol request failed: %s", type(exc).__name__)
+            return {"ok": False, "model_used": self.model, "error": type(exc).__name__}
 
 
 # Compatibility for imports from the first 0.1 implementation.

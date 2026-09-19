@@ -23,11 +23,6 @@ EPIS_ROOT  = os.path.dirname(os.path.abspath(__file__))
 LAYER2_SRC = os.path.join(EPIS_ROOT, "Layer-2", "src")
 sys.path.insert(0, LAYER2_SRC)
 
-from router import EpisRouter
-from memory_manager import MemoryManager
-from epis_core import build_system_prompt, Layer1Engine
-from context_builder import ContextBuilder
-from proactive_delivery import format_kairos_epis_message
 
 # ---------------------------------------------------------------
 # Loglama
@@ -48,11 +43,12 @@ logger = logging.getLogger("EPIS.MAIN")
 # ---------------------------------------------------------------
 # Kairos Pending Teslimi
 # ---------------------------------------------------------------
-def _deliver_pending(engine: Layer1Engine):
+def _deliver_pending(engine):
     """
     pending.json'daki öğeleri EPIS'in kendi sesiyle formüle edip iletir.
     Ham 'context' Layer-1'e verilir, EPIS kendi üslubuyla yazar.
     """
+    from proactive_delivery import format_kairos_epis_message
     pending_path = os.path.join(EPIS_ROOT, "Layer-1", "memory", "pending.json")
     if not os.path.exists(pending_path):
         return
@@ -94,6 +90,10 @@ def _deliver_pending(engine: Layer1Engine):
 # Ana Dongu
 # ---------------------------------------------------------------
 def legacy_main():
+    from router import EpisRouter
+    from memory_manager import MemoryManager
+    from epis_core import build_system_prompt, Layer1Engine
+    from context_builder import ContextBuilder
     logger.info("=" * 50)
     logger.info("EPIS baslatiliyor...")
     logger.info("=" * 50)
@@ -234,17 +234,40 @@ def legacy_main():
 def main(argv=None):
     """EPIS 0.1 defaults to the text agent; old CLI remains opt-in."""
     parser = argparse.ArgumentParser(description="EPIS")
+    parser.add_argument("--env-file", help="Load an existing local environment file without copying secrets")
+    parser.add_argument("--debug", action="store_true", help="Show diagnostic logs in the terminal")
     parser.add_argument(
         "--legacy",
         action="store_true",
         help="Run the pre-0.1 Layer-1/Layer-3 terminal loop.",
     )
     args = parser.parse_args(argv)
+    from dotenv import load_dotenv
+    env_path = args.env_file or os.path.join(EPIS_ROOT, "Layer-3", "keys.env")
+    if args.env_file and not os.path.isfile(env_path):
+        parser.error("Environment file not found")
+    load_dotenv(env_path, override=False)
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+    if not args.legacy:
+        console = logging.StreamHandler()
+        console.setLevel(logging.INFO if args.debug else logging.ERROR)
+        logfile = logging.FileHandler(os.path.join(EPIS_ROOT, "epis.log"), encoding="utf-8")
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s",
+                            handlers=[console, logfile], force=True)
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
     if args.legacy:
         legacy_main()
         return 0
     from agentic.cli import main as agentic_main
-    return agentic_main()
+    try:
+        return agentic_main()
+    except Exception as exc:
+        logger.error("Startup failed: %s", type(exc).__name__)
+        print("EPIS başlatılamadı. Anahtar ve bağımlılık ayarlarını kontrol et.")
+        return 1
 
 
 # ---------------------------------------------------------------

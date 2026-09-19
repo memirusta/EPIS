@@ -24,11 +24,14 @@ class FakeLuna:
 
 
 class FakeContext:
+    def build_minimal(self):
+        return "## ZAMAN\nTest zamanı"
+
     def build(self, user_message):
         return "## ZAMAN\nTest zamanı"
 
 
-class PrivateFakeContext:
+class PrivateFakeContext(FakeContext):
     def build(self, user_message):
         return "## ZAMAN\nTest zamanı\n\n## İLGİLİ GEÇMİŞ\nprivate memory"
 

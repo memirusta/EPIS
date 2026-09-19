@@ -16,16 +16,19 @@ from .permissions import PermissionEngine
 from .tools import build_local_registry
 
 
-def main() -> int:
+def create_core() -> AgentCore:
+    mode = os.getenv("EPIS_LUNA_CONTEXT_MODE", "minimal").lower()
+    if mode not in {"minimal", "local"}:
+        raise ValueError("Unknown context mode")
     memory = MemoryManager()
     registry = build_local_registry()
     state_path = os.path.join(memory.memory_dir, "devices.json")
     devices = DeviceRegistry(state_path)
     # The local agent executes only registry-owned, capability-scoped handlers.
-    local_agent = LocalDeviceAgent(devices, lambda capability, args: _dispatch_capability(registry, capability, args))
-    core = AgentCore(
+    local_agent = LocalDeviceAgent(devices, registry.dispatch_capability)
+    return AgentCore(
         luna=OpenAILunaClient(),
-        system_prompt=build_system_prompt(),
+        system_prompt=build_system_prompt(protocol="agentic", include_private=mode == "local"),
         context_builder=ContextBuilder(memory),
         memory=memory,
         registry=registry,
@@ -34,7 +37,15 @@ def main() -> int:
         permissions=PermissionEngine(),
         sol=OpenAISolClient(PrivacyFilter()),
     )
-    print("EPIS 0.1 — text agent (Luna + deterministic Core)")
+def main() -> int:
+    if not (os.getenv("LUNA_API_KEY") or os.getenv("OPENAI_API_KEY")):
+        print("EPIS: API anahtarı bulunamadı. --env-file ile keys.env dosyanı seç.")
+        return 1
+    core = create_core()
+    print("EPIS 0.1 — Luna + Sol")
+    print("Bu oturumda yazdıkların ve araç sonuçları model API'sine gönderilir.")
+    if os.getenv("EPIS_LUNA_CONTEXT_MODE", "minimal").lower() == "minimal":
+        print("Bağlam: minimal — eski hafıza ve sensörler okunmaz; yeni konuşma yerelde kaydedilir.")
     print("Çıkış: quit | Onay beklerken: evet / hayır")
     while True:
         try:
@@ -56,12 +67,10 @@ def main() -> int:
                 turn = core.handle(text)
             print(f"EPIS: {turn.message}\n")
         except Exception as exc:
-            print(f"EPIS: Bağlantı veya model hatası oluştu: {exc}\n")
+            import logging
+            logging.getLogger("EPIS.AGENT").error("Turn failed: %s", type(exc).__name__)
+            print("EPIS: Bu tur tamamlanamadı. Hata türü epis.log dosyasına kaydedildi.\n")
 
 
 def _dispatch_capability(registry, capability: str, arguments: dict) -> dict:
-    for name in ("open_app", "close_app", "set_volume", "media_play_pause", "get_system_info"):
-        entry = registry.get(name)
-        if entry and entry[0].capability == capability:
-            return registry.dispatch(name, arguments)
-    return {"ok": False, "error": f"No local implementation for {capability}"}
+    return registry.dispatch_capability(capability, arguments)

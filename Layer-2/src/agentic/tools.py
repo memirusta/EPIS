@@ -59,7 +59,13 @@ class ToolRegistry:
         try:
             return handler(arguments)
         except Exception as exc:  # The model sees an error result, never an unhandled exception.
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            return {"ok": False, "error": type(exc).__name__}
+
+    def dispatch_capability(self, capability: str, arguments: dict) -> dict:
+        for spec, _ in self._tools.values():
+            if spec.capability == capability:
+                return self.dispatch(spec.name, arguments)
+        return {"ok": False, "error": f"No local implementation for {capability}"}
 
     @staticmethod
     def _validate(schema: dict, arguments: dict) -> str | None:
@@ -110,16 +116,27 @@ def _open_app(arguments: dict) -> dict:
 
 def _close_app(arguments: dict) -> dict:
     import psutil
+    import win32con
+    import win32gui
+    import win32process
     app = str(arguments.get("app", "")).strip().lower()
     executable = _APPS.get(app)
     if not executable:
         return {"ok": False, "error": "Supported apps: spotify, notepad, calculator"}
-    stopped = []
+    pids = set()
     for process in psutil.process_iter(["name", "pid"]):
         if (process.info.get("name") or "").lower() == executable:
-            process.terminate()
-            stopped.append(process.info["pid"])
-    return {"ok": bool(stopped), "message": f"{app} close requested", "pids": stopped}
+            pids.add(process.info["pid"])
+    requested = []
+
+    def request_close(hwnd, _):
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        if pid in pids and win32gui.IsWindowVisible(hwnd):
+            win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+            requested.append(pid)
+
+    win32gui.EnumWindows(request_close, None)
+    return {"ok": bool(requested), "message": f"{app}: normal window close requested; save dialog may remain", "pids": sorted(set(requested))}
 
 
 def _set_volume(arguments: dict) -> dict:
@@ -132,14 +149,19 @@ def _set_volume(arguments: dict) -> dict:
         from ctypes import POINTER, cast
         from comtypes import CLSCTX_ALL
         from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-        interface = AudioUtilities.GetSpeakers().Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-        endpoint = cast(interface, POINTER(IAudioEndpointVolume))
+        speakers = AudioUtilities.GetSpeakers()
+        if hasattr(speakers, "EndpointVolume"):
+            endpoint = speakers.EndpointVolume
+        else:
+            interface = speakers.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+            endpoint = cast(interface, POINTER(IAudioEndpointVolume))
         endpoint.SetMasterVolumeLevelScalar(level / 100.0, None)
+        observed = round(endpoint.GetMasterVolumeLevelScalar() * 100)
     except ImportError:
         return {"ok": False, "error": "pycaw is not installed; install requirements.txt"}
     except Exception as exc:
-        return {"ok": False, "error": f"Unable to set volume: {exc}"}
-    return {"ok": True, "message": f"volume set to {level}", "level": level}
+        return {"ok": False, "error": f"Unable to set volume: {type(exc).__name__}"}
+    return {"ok": abs(observed - level) <= 1, "message": "volume read back after setting", "level": observed}
 
 
 def _media_play_pause(arguments: dict) -> dict:
@@ -149,7 +171,7 @@ def _media_play_pause(arguments: dict) -> dict:
     import win32con
     win32api.keybd_event(win32con.VK_MEDIA_PLAY_PAUSE, 0, 0, 0)
     win32api.keybd_event(win32con.VK_MEDIA_PLAY_PAUSE, 0, win32con.KEYEVENTF_KEYUP, 0)
-    return {"ok": True, "message": "media play/pause signal sent"}
+    return {"ok": True, "message": "Windows global media toggle sent", "target_app": "unknown", "playback_state": "unverified"}
 
 
 def _system_info(arguments: dict) -> dict:
@@ -171,6 +193,6 @@ def build_local_registry() -> ToolRegistry:
     registry.register(ToolSpec("open_app", "Open an approved local app.", app_schema, "app.open"), _open_app)
     registry.register(ToolSpec("close_app", "Close an approved local app after confirmation.", app_schema, "app.close", RiskClass.YELLOW.value, True), _close_app)
     registry.register(ToolSpec("set_volume", "Set system volume to an integer percentage.", {"type": "object", "properties": {"level": {"type": "integer", "minimum": 0, "maximum": 100}, **device_property}, "required": ["level"], "additionalProperties": False}, "audio.volume"), _set_volume)
-    registry.register(ToolSpec("media_play_pause", "Toggle system media playback.", {"type": "object", "properties": device_property, "additionalProperties": False}, "media.play_pause"), _media_play_pause)
+    registry.register(ToolSpec("media_play_pause", "Toggle global Windows media playback. Cannot target Spotify, select a song, or guarantee play/pause state.", {"type": "object", "properties": device_property, "additionalProperties": False}, "media.play_pause"), _media_play_pause)
     registry.register(ToolSpec("get_system_info", "Read non-sensitive local system status.", {"type": "object", "properties": device_property, "additionalProperties": False}, "system.info"), _system_info)
     return registry
