@@ -95,13 +95,48 @@ Then run:
 python main.py
 ```
 
-Try `Bilgisayarın durumu ne?`, `Spotify'ı aç`, `Sesi 20 yap`, or `Medyayı duraklat`.
+An existing environment file can be used without copying it into this checkout:
+
+```powershell
+python -X utf8 main.py --env-file D:\EPIS\Layer-3\keys.env
+```
+
+The Windows launcher also accepts a specific Python installation:
+
+```powershell
+.\start-agent.ps1 -Python .\.venv\Scripts\python.exe -EnvFile D:\EPIS\Layer-3\keys.env
+```
+
+These launch a Python file directly and work in Windows PowerShell 5.1; no
+inline `python -c` quoting or Base64 is needed. Normal CLI output is conversation
+only; `--debug` shows diagnostic events. Event logs are written to ignored
+`epis.log` without conversation bodies or raw API exception messages.
+
+Try `Bilgisayarın durumu ne?`, `Spotify'ı aç`, `Sesi 20 yap`, or `Medya oynat/duraklat tuşunu gönder`.
+The media tool is a global toggle: it cannot guarantee play versus pause,
+target Spotify, or search/select a specific track. EPIS explains this limitation
+for a song request without sending an unrelated playback signal.
 The observed tool result is returned to Luna before EPIS answers. The legacy
 terminal flow remains available as `python main.py --legacy`; existing
 web/WhatsApp and Kairos paths stay on their compatibility path during migration.
 Luna delegates at most one complex analysis/coding/planning/repository task per
 turn to Sol, then synthesizes Sol's result back into EPIS's voice. Ordinary
 conversation and local device actions stay on Luna.
+
+`minimal` skips private context collection entirely, including Gadgetbridge,
+screen and phone reads. Shared EPIS personality/values are retained, but the
+private user seed/profile are omitted. Messages you type, session history,
+and requested tool results still go to the model API. New interactions are
+stored by the existing local MemoryManager. `local` is a legacy opt-in to full
+context; it does **not** move inference locally. With the default OpenAI client,
+that mode sends collected private context to OpenAI. Unknown mode names fail.
+
+Validation (live smoke uses paid API calls and blocks OS mutations):
+
+```powershell
+python -m unittest discover -s tests
+python scripts/smoke_agent.py --env-file D:\EPIS\Layer-3\keys.env
+```
 
 See [`docs/adr/0001-agentic-pivot.md`](docs/adr/0001-agentic-pivot.md) for the migration map, permissions, cloud/device boundary, and follow-up milestones.
 

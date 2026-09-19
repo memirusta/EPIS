@@ -52,20 +52,22 @@ for complex analysis, coding, planning, and repository review, with at most one
 delegation per turn. Sol's output returns to Luna for EPIS-voice synthesis.
 
 Because Luna is cloud inference, `EPIS_LUNA_CONTEXT_MODE=minimal` is the safe
-default: it sends time context but not retrieved private memory. `local` is an
-explicit opt-in for a controlled endpoint. Sol delegation passes only Luna's
+default: it does not collect private memory or sensor context and excludes
+private profile/seed material from the identity prompt. Session messages and
+requested tool results still go to OpenAI. `local` opts into full context but
+does not change the inference endpoint. Sol delegation passes only Luna's
 self-contained task through the existing local privacy filter.
 
 The initial Windows registry contains exactly five tools: `open_app`,
 `close_app`, `set_volume`, `media_play_pause`, and `get_system_info`.
 Permission classes are green (automatic), yellow (confirmation), and red
-(explicit confirmation). `close_app` is yellow because it may lose unsaved
-work.
+(explicit confirmation). `close_app` is yellow and sends WM_CLOSE so the
+application can offer its normal save dialog; it never force-terminates.
 
 The local `DeviceRegistry` stores only availability/capability metadata. A
 `LocalDeviceAgent` registers the current Legion-like machine; private memory,
 credentials, file indexes, and project state remain local. `codex.send` is
-already a reserved capability, but has no UI-macro or real Codex implementation
+reserved in the design, but not advertised by the local agent without a real implementation
 in 0.1. A future trusted adapter can route “continue” and scoped follow-ups.
 
 ## Cloud/device direction
@@ -85,9 +87,9 @@ planned primary voice layer.
 | --- | --- |
 | Model hallucinates an action | Only named registry tools dispatch; observed results are returned. |
 | Model broadens a command | Allow-listed app aliases/schemas; no shell tool. |
-| App closing loses work | `close_app` always asks for confirmation. |
+| App closing loses work | `close_app` asks for confirmation and sends normal WM_CLOSE. |
 | Remote device confusion | Routing requires an online capability match and fails closed. |
-| Private data reaches external inference | Context stays local by default; privacy filter remains on Sol route. |
+| Private data reaches external inference | Minimal mode skips private retrieval; typed messages/tool results are still sent. Sol filtering is best effort. |
 | Cost grows per action | Luna handles normal interaction; Sol is only an explicit specialist. |
 
 ## Follow-up milestones

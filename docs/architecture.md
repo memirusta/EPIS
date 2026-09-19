@@ -20,7 +20,10 @@ flowchart LR
 
 ## Luna — frontline (Layer-1 compatibility)
 The user-facing model is direct OpenAI `gpt-5.6-luna`. It receives a context package containing
-relevant memory, identity, values, and current state. Luna can propose a named,
+shared identity, values, time, current conversation, and requested tool results.
+By default, `ContextBuilder.build_minimal()` avoids private retrieval and sensor
+reads altogether. Full memory/context is opt-in; `local` names the legacy
+context mode, not the location of inference. Luna can propose a named,
 schema-validated tool call; it cannot grant its own permissions. After Core
 returns an observed result, Luna delivers the final response in EPIS's single
 voice.
@@ -30,14 +33,19 @@ Pure Python infrastructure. It performs context retrieval, device routing,
 permissions, tool dispatch, task state, privacy filtering, proactive scheduling,
 sensor integration, and nightly processing. It is intentionally not an LLM and
 is the security boundary. The 0.1 registry has no arbitrary shell capability.
+Kairos, proactive delivery and nightly jobs remain on their existing legacy
+entry points; the text CLI does not start these services automatically.
 
 ## Sol — specialist model pool (Layer-3 compatibility)
 The default specialist is direct OpenAI `gpt-5.6-sol`, behind a replaceable
 interface, for explicitly delegated expensive or specialized
-tasks such as reasoning, code, repository analysis, planning, visual analysis,
-and nightly synthesis. A normal local tool call does not go to Sol. Core permits
+tasks such as reasoning, supplied code/repository excerpts, and planning.
+The 0.1 specialist receives text only and has no repository filesystem tool.
+Nightly jobs retain their existing provider routing. A normal local tool call does not go to Sol. Core permits
 at most one Sol delegation per turn, and the existing privacy layer minimizes
 personal data before the external call.
+This filter is best effort, not a guarantee that all sensitive content is removed.
+The local reverse mapping restores the specialist answer before Luna sees it.
 
 ## Identity continuity
 The architecture treats models as replaceable computation. Stable values, personality definitions, long-term memory, and approved learning live outside model weights.
@@ -51,3 +59,32 @@ state remain encrypted and local by default. Phone and ElevenLabs voice I/O are
 later milestones, after the text loop is stable.
 
 See [ADR 0001](adr/0001-agentic-pivot.md) for migration details and risks.
+
+## Text-loop reliability
+
+Legacy `build_system_prompt()` still produces the original JSON protocol.
+The CLI selects `protocol="agentic"` and excludes private profile material in
+minimal mode. A narrow adapter unwraps old `type=direct` envelopes as a fallback;
+JSON in normal text never authorizes a tool execution.
+
+Every call is validated before permission checks. Confirmation binds to the
+specific tool arguments and displayed device. Rejection cancels the remaining
+batch; a new request cancels stale pending work. Confirmation rechecks device
+availability. All call/result pairs remain complete across pauses, failures
+and history trimming. Limits are four Luna responses, up to eight dispatched
+calls, and one Sol delegation per turn, carried across confirmations.
+
+An explicit missing/offline device never falls back to a different device.
+Cached devices load offline until re-registered. `codex.send` is reserved in
+the design but is not advertised by the local agent before an implementation
+exists. The registry can represent a future device that owns this capability.
+
+App closing sends normal WM_CLOSE after confirmation rather than terminating
+the process. Volume is read back after setting. The global media toggle reports
+its target and resulting playback state as unverified.
+
+Validation: 28 unit/regression tests, Windows PowerShell 5.1 startup/quit,
+and live greeting, system-info, unsupported-song and Luna→Sol→Luna tests.
+OS-changing tool paths are mocked in the regression suite; volume was also
+checked against the live endpoint by restoring its initial value. Voice,
+remote transport, Spotify track selection and Tauri remain future work.
