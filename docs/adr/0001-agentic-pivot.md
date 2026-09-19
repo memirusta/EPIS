@@ -2,6 +2,11 @@
 
 **Status:** accepted for 0.1
 
+The initial in-process device boundary and five-tool inventory below are
+historical; [ADR 0002](0002-local-device-process.md) records the implemented
+stdio worker, action lifecycle and nine-tool increment. Legacy memory/model
+migration decisions in this ADR remain applicable.
+
 ## Decision
 
 EPIS moves incrementally from the legacy Layer-1 JSON-envelope conversation

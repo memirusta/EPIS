@@ -107,6 +107,23 @@ The Windows launcher also accepts a specific Python installation:
 .\start-agent.ps1 -Python .\.venv\Scripts\python.exe -EnvFile D:\EPIS\Layer-3\keys.env
 ```
 
+The CLI now starts an owned, hidden Device Worker process using private pipes;
+Core no longer runs the Windows handlers in its own process by default. No
+network port or startup service is installed. The worker exits with the CLI.
+`EPIS_DEVICE_TRANSPORT=inprocess` is an explicit compatibility option.
+
+Use `/devices` to inspect availability/capabilities, `/tools` for the permitted
+tool list, and `/tasks` for recent action receipts, without calling a model.
+Luna also has `get_devices` and `get_task_status` for conversational requests.
+`get_battery`, `media_next`, `media_previous` and approved HTTPS `open_url` are
+now available in addition to the first five tools. App closing and URL opening
+require approval, valid for 120 seconds. Use only one CLI per checkout.
+
+Interrupted actions are recorded as unknown and are not replayed automatically.
+The local journal contains metadata only, not command arguments or conversation
+bodies. See [ADR 0002](docs/adr/0002-local-device-process.md) for the process,
+permission and lifecycle boundaries, verification and remaining remote work.
+
 These launch a Python file directly and work in Windows PowerShell 5.1; no
 inline `python -c` quoting or Base64 is needed. Normal CLI output is conversation
 only; `--debug` shows diagnostic events. Event logs are written to ignored
@@ -131,7 +148,9 @@ stored by the existing local MemoryManager. `local` is a legacy opt-in to full
 context; it does **not** move inference locally. With the default OpenAI client,
 that mode sends collected private context to OpenAI. Unknown mode names fail.
 
-Validation (live smoke uses paid API calls and blocks OS mutations):
+Validation (live smoke uses paid API calls, blocks OS mutations, and sends
+synthetic prompts plus actual system/battery, device and task metadata to the
+configured model APIs; run only if you authorize that transmission):
 
 ```powershell
 python -m unittest discover -s tests

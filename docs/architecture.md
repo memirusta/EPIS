@@ -60,6 +60,13 @@ later milestones, after the text loop is stable.
 
 See [ADR 0001](adr/0001-agentic-pivot.md) for migration details and risks.
 
+The next local increment is implemented in [ADR 0002](adr/0002-local-device-process.md):
+Core dispatches through `DeviceTransport` to an owned stdio worker by default.
+It adds command receipts, expiring approvals, worker-side validation, bounded
+transport and no automatic replay after uncertain execution. This is a local
+process boundary, not a deployed cloud service or an OS privilege sandbox.
+The old in-process adapter remains an explicit compatibility option.
+
 ## Text-loop reliability
 
 Legacy `build_system_prompt()` still produces the original JSON protocol.
@@ -83,8 +90,11 @@ App closing sends normal WM_CLOSE after confirmation rather than terminating
 the process. Volume is read back after setting. The global media toggle reports
 its target and resulting playback state as unverified.
 
-Validation: 28 unit/regression tests, Windows PowerShell 5.1 startup/quit,
-and live greeting, system-info, unsupported-song and Luna→Sol→Luna tests.
-OS-changing tool paths are mocked in the regression suite; volume was also
-checked against the live endpoint by restoring its initial value. Voice,
-remote transport, Spotify track selection and Tauri remain future work.
+Validation for the process-boundary increment: 48 tests, actual local worker
+read-only round trips, and Windows PowerShell 5.1 startup/inspection/quit.
+The earlier in-process version passed live Luna/Sol and volume smoke tests;
+the new process version has not yet passed a live model test (external metadata
+transmission requires approval). Volume also passed a local real-worker check
+with its original level restored. Other OS-mutating adapters are mocked in
+current regression coverage. Voice, remote network transport, Spotify track selection
+and Tauri remain future work.
