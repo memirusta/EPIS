@@ -3,6 +3,10 @@
 Status: implemented on the agentic pivot branch. Supersedes the in-process-only
 device boundary in ADR 0001; this is not a cloud release.
 
+[ADR 0003](0003-paired-local-tls.md) subsequently adds a tested optional local
+mutual-TLS harness, enrollment/revocation and durable encrypted receipts. This
+ADR retains the original stdio contract and its historical verification.
+
 ## Why this step
 
 The first pivot registered a device but called its OS handlers inside Core.

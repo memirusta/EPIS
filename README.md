@@ -112,6 +112,22 @@ Core no longer runs the Windows handlers in its own process by default. No
 network port or startup service is installed. The worker exits with the CLI.
 `EPIS_DEVICE_TRANSPORT=inprocess` is an explicit compatibility option.
 
+An optional enrolled local TLS mode is also implemented. Explicit one-time
+setup creates encrypted Windows user-bound keys and a capability grant:
+
+```powershell
+python scripts/device_pairing.py init-local --all-local-tools
+python -X utf8 main.py --env-file D:\EPIS\Layer-3\keys.env --device-transport paired
+```
+
+Omit `--all-local-tools` at setup for read-only system/battery scope. Profiles
+are never overwritten silently. The paired mode is **loopback-only**, not
+phone/cloud access: it verifies mutual certificates, enforces revocable
+capability scope, sends heartbeats and retains encrypted device receipts
+across restarts. It does not change the firewall, system trust store or Windows
+startup settings. See [ADR 0003](docs/adr/0003-paired-local-tls.md) for setup,
+revocation, validation, DPAPI limitations and the remaining remote work.
+
 Use `/devices` to inspect availability/capabilities, `/tools` for the permitted
 tool list, and `/tasks` for recent action receipts, without calling a model.
 Luna also has `get_devices` and `get_task_status` for conversational requests.
@@ -156,6 +172,13 @@ configured model APIs; run only if you authorize that transmission):
 python -m unittest discover -s tests
 python scripts/smoke_agent.py --env-file D:\EPIS\Layer-3\keys.env
 ```
+
+The smoke accepts `--device-transport paired`. In paired mode, encrypted device
+tool receipts persist for deduplication; test conversation-memory writes and
+Core action-journal persistence are disabled. The 68-test suite includes real
+loopback TLS and Windows DPAPI checks; run it as the normal Windows user, not
+an account without a loaded DPAPI profile. No external API calls occur in the
+unit/integration suite.
 
 See [`docs/adr/0001-agentic-pivot.md`](docs/adr/0001-agentic-pivot.md) for the migration map, permissions, cloud/device boundary, and follow-up milestones.
 

@@ -13,10 +13,16 @@ sys.path.insert(0, str(ROOT / "Layer-2" / "src"))
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", required=True)
+    parser.add_argument("--device-transport", choices=["stdio", "paired", "inprocess"])
+    parser.add_argument("--pairing-dir")
     args = parser.parse_args()
     from dotenv import load_dotenv
     load_dotenv(args.env_file)
     os.environ["EPIS_LUNA_CONTEXT_MODE"] = "minimal"
+    if args.device_transport:
+        os.environ["EPIS_DEVICE_TRANSPORT"] = args.device_transport
+    if args.pairing_dir:
+        os.environ["EPIS_PAIRING_DIR"] = args.pairing_dir
     from agentic.cli import create_core
 
     core = create_core()

@@ -67,6 +67,13 @@ transport and no automatic replay after uncertain execution. This is a local
 process boundary, not a deployed cloud service or an OS privilege sandbox.
 The old in-process adapter remains an explicit compatibility option.
 
+[ADR 0003](adr/0003-paired-local-tls.md) adds optional `paired` mode: local mutual
+TLS, offline certificate enrollment, signed capability scope, live revocation,
+heartbeat and DPAPI-encrypted durable device receipts. It is validated only
+between processes on this Windows computer; no off-machine endpoint or cloud
+deployment exists. Stdio remains the default. Memory/context and Luna/Sol
+interfaces are unchanged.
+
 ## Text-loop reliability
 
 Legacy `build_system_prompt()` still produces the original JSON protocol.
@@ -90,7 +97,7 @@ App closing sends normal WM_CLOSE after confirmation rather than terminating
 the process. Volume is read back after setting. The global media toggle reports
 its target and resulting playback state as unverified.
 
-Validation for the process-boundary increment: 48 tests, actual local worker
+Validation for the stdio process-boundary increment: 48 tests, actual local worker
 read-only round trips, and Windows PowerShell 5.1 startup/inspection/quit.
 After explicit user authorization, the process version passed all seven live
 model smoke cases: greeting, system info, device listing, battery, action
@@ -99,4 +106,7 @@ The live test blocked OS mutations and private context retrieval; test
 conversations and action receipts were not persisted. Volume also passed a local real-worker check
 with its original level restored. Other OS-mutating adapters are mocked in
 current regression coverage. Voice, remote network transport, Spotify track selection
-and Tauri remain future work.
+and Tauri remain future work. The subsequent paired increment passes 68 tests,
+PowerShell startup/inspection/quit and the seven authorized live model smoke
+cases over loopback TLS. Paired device receipts intentionally persist encrypted
+for deduplication, unlike the ephemeral stdio smoke's device cache.
