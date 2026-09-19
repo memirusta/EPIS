@@ -9,6 +9,7 @@ Layer-3         : Gemini & Claude API havuzu
 Kullanim: python main.py
 """
 
+import argparse
 import os
 import sys
 import json
@@ -92,7 +93,7 @@ def _deliver_pending(engine: Layer1Engine):
 # ---------------------------------------------------------------
 # Ana Dongu
 # ---------------------------------------------------------------
-def main():
+def legacy_main():
     logger.info("=" * 50)
     logger.info("EPIS baslatiliyor...")
     logger.info("=" * 50)
@@ -230,6 +231,22 @@ def main():
     memory.update_current_state({"session_active": False})
 
 
+def main(argv=None):
+    """EPIS 0.1 defaults to the text agent; old CLI remains opt-in."""
+    parser = argparse.ArgumentParser(description="EPIS")
+    parser.add_argument(
+        "--legacy",
+        action="store_true",
+        help="Run the pre-0.1 Layer-1/Layer-3 terminal loop.",
+    )
+    args = parser.parse_args(argv)
+    if args.legacy:
+        legacy_main()
+        return 0
+    from agentic.cli import main as agentic_main
+    return agentic_main()
+
+
 # ---------------------------------------------------------------
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

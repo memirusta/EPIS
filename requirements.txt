@@ -10,3 +10,4 @@ uvicorn[standard]
 requests
 cryptography
 uiautomation
+pycaw
