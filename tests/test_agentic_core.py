@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(ROOT, "Layer-2", "src"))
 
 from agentic.core import AgentCore
 from agentic.devices import DeviceRegistry, LocalDeviceAgent
-from agentic.luna import LunaReply, ToolCall
+from agentic.luna import LunaReply, OpenAILunaClient, ToolCall
 from agentic.permissions import PermissionEngine, RiskClass
 from agentic.tools import ToolRegistry, ToolSpec, build_local_registry
 
@@ -73,6 +73,14 @@ def build_core(replies, risk=RiskClass.GREEN.value, sol=None):
 
 
 class AgentCoreTests(unittest.TestCase):
+    def test_luna_defaults_to_no_reasoning_for_chat_tools(self):
+        old = os.environ.pop("LUNA_REASONING_EFFORT", None)
+        try:
+            self.assertEqual(OpenAILunaClient(api_key="test-key").reasoning_effort, "none")
+        finally:
+            if old is not None:
+                os.environ["LUNA_REASONING_EFFORT"] = old
+
     def test_green_tool_executes_and_luna_owns_final_voice(self):
         core = build_core([
             LunaReply(tool_calls=[ToolCall("call-1", "get_system_info", {})]),

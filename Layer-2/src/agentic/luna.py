@@ -45,7 +45,11 @@ class OpenAILunaClient:
         self.model = model or os.getenv("LUNA_MODEL", "gpt-5.6-luna")
         self.base_url = (base_url or os.getenv("LUNA_BASE_URL") or "").rstrip("/") or None
         self.api_key = api_key or os.getenv("LUNA_API_KEY") or os.getenv("OPENAI_API_KEY")
-        self.reasoning_effort = os.getenv("LUNA_REASONING_EFFORT", "low")
+        # Chat Completions currently rejects function tools for Luna when
+        # reasoning_effort is anything other than "none". Heavy reasoning is
+        # delegated to Sol, so the no-reasoning default also matches EPIS's
+        # cost and latency boundary for frontline turns.
+        self.reasoning_effort = os.getenv("LUNA_REASONING_EFFORT", "none")
 
     def _client(self):
         try:

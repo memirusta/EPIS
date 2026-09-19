@@ -83,7 +83,7 @@ For the 0.1 text agent, configure the direct OpenAI Luna/Sol models in the ignor
 ```text
 OPENAI_API_KEY=...
 LUNA_MODEL=gpt-5.6-luna
-LUNA_REASONING_EFFORT=low
+LUNA_REASONING_EFFORT=none
 SOL_MODEL=gpt-5.6-sol
 SOL_REASONING_EFFORT=high
 EPIS_LUNA_CONTEXT_MODE=minimal
