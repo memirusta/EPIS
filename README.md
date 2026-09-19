@@ -7,7 +7,7 @@ EPIS is an experimental long-term personal AI architecture built around one prin
 
 Instead of storing the whole concept of a personal AI inside one model checkpoint, EPIS separates conversational inference from memory, values, identity, routing, privacy, proactive behavior, and long-term learning.
 
-> **Status:** working experimental implementation. The current bottleneck is affordable, high-quality frontline inference on consumer hardware.
+> **Status:** working experimental implementation. EPIS 0.1 adds a text-first, capability-based agent loop while preserving its existing memory, privacy, Kairos, and nightly systems.
 
 ## Why EPIS?
 
@@ -17,17 +17,19 @@ Foundation models change quickly. A long-term personal system should not have to
 
 ```mermaid
 flowchart LR
-    U[User] --> L1[Layer 1: Frontline]
-    L1 -->|tool call| L2[Layer 2: Python Orchestrator]
-    L2 --> P[Privacy + RAG + Memory]
-    L2 --> L3[Layer 3: External Model Pool]
-    L3 --> L2 --> L1 --> U
-    K[Kairos / Nightly Recalculation] --> L2
+    U[Text now / Voice later] --> L[Luna: frontline EPIS voice]
+    L --> C[EPIS Core: deterministic orchestrator]
+    C --> M[Memory + Context + Privacy]
+    C --> T[PermissionEngine + ToolRegistry]
+    T --> D[Capability-based Device Agent]
+    L -. complex analysis only .-> S[Sol]
+    S --> L
+    K[Kairos / Nightly Recalculation] --> M
 ```
 
-- **Layer 1 — Frontline:** the user-facing conversational model and EPIS voice.
-- **Layer 2 — Orchestrator:** pure Python infrastructure for routing, RAG, file management, privacy filtering, sensors, Kairos triggers, and nightly jobs.
-- **Layer 3 — Model Pool:** replaceable external models used for specialized or expensive reasoning tasks.
+- **Luna — Frontline:** the normal user-facing EPIS voice, context consumer, and tool suggester.
+- **EPIS Core:** deterministic memory/context assembly, permissions, tool dispatch, device routing, task state, and policy boundary.
+- **Sol — Specialist:** a privacy-aware heavy-analysis delegate for code, planning, repository work, and long reasoning; it is not used for ordinary tools.
 
 See [`docs/architecture.md`](docs/architecture.md) for details.
 
@@ -51,7 +53,7 @@ The surrounding architecture is functional, but small models that fit comfortabl
 
 EPIS is therefore being used to evaluate a hybrid approach: local/open-weight frontline models plus selectively routed external reasoning and periodic fine-tuning.
 
-## Quick start
+## EPIS 0.1 quick start
 
 > This repository ships with **no personal data and no credentials**. Monitoring integrations are disabled by default.
 
@@ -75,6 +77,28 @@ cp Layer-3/keys.env.example Layer-3/keys.env
 ```
 
 Fill only the providers/integrations you intend to use, then start the UI using the scripts in `scripts/` or the project launcher.
+
+For the 0.1 text agent, configure a Luna endpoint in `Layer-3/keys.env` (or process environment):
+
+```text
+LUNA_MODEL=qwen3.5:9b
+LUNA_BASE_URL=http://localhost:11434/v1
+# LUNA_API_KEY=...  # only when the selected endpoint requires it
+# Set EPIS_LUNA_CONTEXT_MODE=minimal for an untrusted/hosted frontend endpoint.
+```
+
+Then run:
+
+```bash
+python main.py
+```
+
+Try `Bilgisayarın durumu ne?`, `Spotify'ı aç`, `Sesi 20 yap`, or `Medyayı duraklat`.
+The observed tool result is returned to Luna before EPIS answers. The legacy
+terminal flow remains available as `python main.py --legacy`; existing
+web/WhatsApp and Kairos paths stay on their compatibility path during migration.
+
+See [`docs/adr/0001-agentic-pivot.md`](docs/adr/0001-agentic-pivot.md) for the migration map, permissions, cloud/device boundary, and follow-up milestones.
 
 The optional WhatsApp bridge has its own Node.js dependencies:
 

@@ -1,28 +1,51 @@
 # Architecture
 
-EPIS separates persistent personal state from model inference.
+EPIS separates persistent personal state from model inference. EPIS 0.1 keeps
+the existing Layer terminology for compatibility while making the execution
+boundary explicit: a model suggests work; deterministic Core policy permits
+and dispatches it.
 
 ```mermaid
 flowchart LR
-    U[User] --> L1[Layer 1: Frontline Conversation]
-    L1 -->|direct response| U
-    L1 -->|tool call| L2[Layer 2: Python Orchestrator]
-    L2 --> RAG[Memory / RAG / Privacy]
-    RAG --> L2
-    L2 -->|anonymized task| L3[Layer 3: External Model Pool]
-    L3 --> L2
-    L2 --> L1
-    K[Kairos / Nightly Jobs] --> L2
+    U[Text now / Voice later] --> L[Luna / Frontline]
+    L --> C[EPIS Core]
+    C --> RAG[Memory / Context / Privacy]
+    C --> PE[PermissionEngine]
+    PE --> TR[ToolRegistry]
+    TR --> DA[Device Agent]
+    L -. complex analysis only .-> S[Sol / Layer-3]
+    S --> L
+    K[Kairos / Nightly Jobs] --> RAG
 ```
 
-## Layer 1 — Frontline
-The user-facing conversational model. It receives a context package containing relevant memory, identity, values, and current state.
+## Luna — frontline (Layer-1 compatibility)
+The user-facing conversational model. It receives a context package containing
+relevant memory, identity, values, and current state. Luna can propose a named,
+schema-validated tool call; it cannot grant its own permissions. After Core
+returns an observed result, Luna delivers the final response in EPIS's single
+voice.
 
-## Layer 2 — Orchestrator
-Pure Python infrastructure. It performs routing, context retrieval, privacy filtering, tool dispatch, proactive scheduling, sensor integration, and nightly processing. It is intentionally not an LLM.
+## EPIS Core — deterministic orchestrator (Layer-2)
+Pure Python infrastructure. It performs context retrieval, device routing,
+permissions, tool dispatch, task state, privacy filtering, proactive scheduling,
+sensor integration, and nightly processing. It is intentionally not an LLM and
+is the security boundary. The 0.1 registry has no arbitrary shell capability.
 
-## Layer 3 — Model pool
-Replaceable external models for expensive or specialized tasks such as reasoning, code, visual analysis, and nightly synthesis. The privacy layer is designed to minimize personal data sent outside the local system.
+## Sol — specialist model pool (Layer-3 compatibility)
+Replaceable external models for explicitly delegated expensive or specialized
+tasks such as reasoning, code, repository analysis, planning, visual analysis,
+and nightly synthesis. A normal local tool call does not go to Sol. The existing
+privacy layer minimizes personal data before an external call.
 
 ## Identity continuity
 The architecture treats models as replaceable computation. Stable values, personality definitions, long-term memory, and approved learning live outside model weights.
+
+## Device and cloud boundary
+
+The 0.1 local `DeviceRegistry` uses capability-based routing. A future always-on
+cloud Core may keep low-sensitivity task/sync/device metadata and call inference
+APIs without a GPU. Private memory, credentials, file indexes, and project
+state remain encrypted and local by default. Phone and ElevenLabs voice I/O are
+later milestones, after the text loop is stable.
+
+See [ADR 0001](adr/0001-agentic-pivot.md) for migration details and risks.
