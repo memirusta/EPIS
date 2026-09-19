@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import os
 import platform
 from typing import Callable
+from urllib.parse import urlsplit
 
 from .permissions import RiskClass
 
@@ -46,6 +47,16 @@ class ToolRegistry:
     def openai_schemas(self) -> list[dict]:
         return [spec.openai_schema() for spec, _ in self._tools.values()]
 
+    def specs(self) -> list[ToolSpec]:
+        return [spec for spec, _ in self._tools.values()]
+
+    def capabilities(self, target_platform: str | None = None) -> set[str]:
+        target_platform = target_platform or platform.system().lower()
+        return {spec.capability for spec in self.specs() if target_platform in spec.platforms}
+
+    def for_capability(self, capability: str):
+        return next((entry for entry in self._tools.values() if entry[0].capability == capability), None)
+
     def dispatch(self, name: str, arguments: dict) -> dict:
         entry = self.get(name)
         if not entry:
@@ -59,7 +70,7 @@ class ToolRegistry:
         try:
             return handler(arguments)
         except Exception as exc:  # The model sees an error result, never an unhandled exception.
-            return {"ok": False, "error": type(exc).__name__}
+            return {"ok": False, "outcome": "unknown", "error": type(exc).__name__}
 
     def dispatch_capability(self, capability: str, arguments: dict) -> dict:
         for spec, _ in self._tools.values():
@@ -85,6 +96,8 @@ class ToolRegistry:
             expected = definition.get("type")
             if expected == "string" and not isinstance(value, str):
                 return f"{key} must be a string"
+            if isinstance(value, str) and len(value) > definition.get("maxLength", 4096):
+                return f"{key} is too long"
             if expected == "integer" and (not isinstance(value, int) or isinstance(value, bool)):
                 return f"{key} must be an integer"
             if "enum" in definition and value not in definition["enum"]:
@@ -160,7 +173,7 @@ def _set_volume(arguments: dict) -> dict:
     except ImportError:
         return {"ok": False, "error": "pycaw is not installed; install requirements.txt"}
     except Exception as exc:
-        return {"ok": False, "error": f"Unable to set volume: {type(exc).__name__}"}
+        return {"ok": False, "outcome": "unknown", "error": f"Unable to set volume: {type(exc).__name__}"}
     return {"ok": abs(observed - level) <= 1, "message": "volume read back after setting", "level": observed}
 
 
@@ -186,6 +199,39 @@ def _system_info(arguments: dict) -> dict:
     }
 
 
+def _battery(arguments: dict) -> dict:
+    import psutil
+    battery = psutil.sensors_battery()
+    return {"ok": True, "present": battery is not None,
+            "percent": battery.percent if battery else None,
+            "plugged_in": battery.power_plugged if battery else None}
+
+
+def _media_skip(direction: str) -> dict:
+    import win32api
+    import win32con
+    key = win32con.VK_MEDIA_NEXT_TRACK if direction == "next" else win32con.VK_MEDIA_PREV_TRACK
+    win32api.keybd_event(key, 0, 0, 0)
+    win32api.keybd_event(key, 0, win32con.KEYEVENTF_KEYUP, 0)
+    return {"ok": True, "message": f"Windows global media {direction} signal sent",
+            "target_app": "unknown", "playback_state": "unverified"}
+
+
+def _open_url(arguments: dict) -> dict:
+    url = arguments["url"]
+    try:
+        parsed = urlsplit(url)
+        valid = (parsed.scheme == "https" and parsed.hostname and not parsed.username
+                 and not parsed.password and not any(c.isspace() or ord(c) < 32 for c in url)
+                 and "\\" not in url and parsed.port in (None, 443))
+    except ValueError:
+        valid = False
+    if not valid:
+        return {"ok": False, "error": "Only HTTPS URLs without credentials, whitespace or custom ports are supported"}
+    os.startfile(url)
+    return {"ok": True, "message": "Browser navigation requested; page loading is unverified"}
+
+
 def build_local_registry() -> ToolRegistry:
     registry = ToolRegistry()
     device_property = {"device_id": {"type": "string", "description": "Optional registered target device id; omit for this computer."}}
@@ -195,4 +241,12 @@ def build_local_registry() -> ToolRegistry:
     registry.register(ToolSpec("set_volume", "Set system volume to an integer percentage.", {"type": "object", "properties": {"level": {"type": "integer", "minimum": 0, "maximum": 100}, **device_property}, "required": ["level"], "additionalProperties": False}, "audio.volume"), _set_volume)
     registry.register(ToolSpec("media_play_pause", "Toggle global Windows media playback. Cannot target Spotify, select a song, or guarantee play/pause state.", {"type": "object", "properties": device_property, "additionalProperties": False}, "media.play_pause"), _media_play_pause)
     registry.register(ToolSpec("get_system_info", "Read non-sensitive local system status.", {"type": "object", "properties": device_property, "additionalProperties": False}, "system.info"), _system_info)
+    simple = {"type": "object", "properties": device_property, "additionalProperties": False}
+    registry.register(ToolSpec("get_battery", "Read battery level and charging status.", simple, "system.battery"), _battery)
+    registry.register(ToolSpec("media_next", "Send global Windows next-track signal; target app and playback state are unverified.", simple, "media.next"), lambda args: _media_skip("next"))
+    registry.register(ToolSpec("media_previous", "Send global Windows previous-track signal; target app and playback state are unverified.", simple, "media.previous"), lambda args: _media_skip("previous"))
+    registry.register(ToolSpec("open_url", "Open an HTTPS URL in the default browser after explicit confirmation.",
+                              {"type": "object", "properties": {"url": {"type": "string", "maxLength": 2048}, **device_property},
+                               "required": ["url"], "additionalProperties": False},
+                              "browser.open_url", RiskClass.YELLOW.value, True), _open_url)
     return registry

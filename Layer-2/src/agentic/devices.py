@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import json
 import os
 import socket
+import platform
 from typing import Callable
 
 
@@ -68,7 +69,7 @@ class DeviceRegistry:
                     # Disk cache is not evidence of a live connection.
                     raw["online"] = False
                     self._devices[raw["device_id"]] = Device(**raw)
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, KeyError):
             # A corrupt availability cache must never prevent a local agent from starting.
             self._devices = {}
 
@@ -84,19 +85,25 @@ class DeviceRegistry:
 class LocalDeviceAgent:
     """Windows MVP adapter. A remote agent will implement this same contract."""
 
-    def __init__(self, registry: DeviceRegistry, dispatcher: Callable[[str, dict], dict]):
+    def __init__(self, registry: DeviceRegistry, dispatcher: Callable[[str, dict], dict], capabilities=None):
         self.registry = registry
         self.dispatcher = dispatcher
         self.device = registry.register(Device(
-            device_id=os.getenv("EPIS_DEVICE_ID", socket.gethostname().lower()),
-            display_name=os.getenv("EPIS_DEVICE_NAME", socket.gethostname()),
-            platform="windows" if os.name == "nt" else os.name,
-            capabilities={
+            device_id=os.getenv("EPIS_DEVICE_ID") or socket.gethostname().lower(),
+            display_name=os.getenv("EPIS_DEVICE_NAME") or socket.gethostname(),
+            platform=platform.system().lower(),
+            capabilities=capabilities if capabilities is not None else {
                 "system.info", "app.open", "app.close", "audio.volume", "media.play_pause",
             },
         ))
 
-    def execute(self, capability: str, arguments: dict) -> dict:
+    def execute(self, capability: str, arguments: dict, *, confirmed=False, request_id=None) -> dict:
         if capability not in self.device.capabilities:
             return {"ok": False, "error": f"Capability unavailable: {capability}"}
         return self.dispatcher(capability, arguments)
+
+    def close(self):
+        self.device.online = False
+
+    def refresh(self):
+        return self.device.online

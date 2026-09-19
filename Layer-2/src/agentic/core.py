@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from copy import deepcopy
 import json
 import logging
 import os
+import time
 from typing import Any
 
-from .devices import DeviceRegistry, LocalDeviceAgent
+from .devices import DeviceRegistry
 from .luna import LunaClient, ToolCall
 from .permissions import PermissionEngine
 from .tools import ToolRegistry
+from .tasks import TaskStore
+from .transport import DeviceTransport
 
 logger = logging.getLogger("EPIS.AGENT")
 
@@ -25,6 +29,7 @@ class PendingAction:
     results: list[dict] = field(default_factory=list)
     model_steps: int = 0
     sol_delegations: int = 0
+    expires_at: float = field(default_factory=lambda: time.monotonic() + 120)
 
 
 @dataclass
@@ -69,6 +74,15 @@ SOL_TOOL_SCHEMA = {
     },
 }
 
+CORE_TOOL_SCHEMAS = [
+    {"type": "function", "function": {"name": name, "description": description,
+     "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}}
+    for name, description in (
+        ("get_devices", "List registered devices, exact device IDs, current availability and capabilities. Use IDs from this result, never invent device IDs."),
+        ("get_task_status", "Read recent EPIS device-command receipt states. Unknown means an action may have run; never retry it automatically."),
+    )
+]
+
 
 class AgentCore:
     """Coordinates Luna, local context, device routing, and controlled tools.
@@ -86,9 +100,10 @@ class AgentCore:
         memory,
         registry: ToolRegistry,
         devices: DeviceRegistry,
-        local_agent: LocalDeviceAgent,
+        local_agent: DeviceTransport,
         permissions: PermissionEngine | None = None,
         sol: SolDelegator | None = None,
+        tasks: TaskStore | None = None,
     ):
         self.luna = luna
         self.system_prompt = system_prompt
@@ -101,11 +116,15 @@ class AgentCore:
         self.sol = sol or SolDelegator()
         self.history: list[dict] = []
         self.pending: PendingAction | None = None
+        self.tasks = tasks if tasks is not None else TaskStore()
+        self.transports: dict[str, DeviceTransport] = {local_agent.device.device_id: local_agent}
+        self._call_tasks: dict[str, str] = {}
 
     def handle(self, user_message: str) -> AgentTurn:
         if self.pending:
             # A new request must never inherit approval for an older action.
             self.reject_pending()
+        self._call_tasks = {}
         mode = os.getenv("EPIS_LUNA_CONTEXT_MODE", "minimal").lower()
         if mode not in {"minimal", "local"}:
             raise ValueError("EPIS_LUNA_CONTEXT_MODE must be minimal or local")
@@ -130,6 +149,11 @@ class AgentCore:
         if not self.pending:
             return AgentTurn("Onay bekleyen bir işlem yok.", [])
         pending, self.pending = self.pending, None
+        if time.monotonic() > pending.expires_at:
+            self.pending = pending
+            turn = self.reject_pending()
+            turn.message = "Onayın süresi doldu; işlem yapılmadı. İstersen yeniden iste."
+            return turn
         turn = self._dispatch(pending.tool_call, confirmed=True)
         pending.results.extend(turn.tool_results)
         self._append_result(pending.messages, pending.tool_call, turn.tool_results[0])
@@ -141,6 +165,8 @@ class AgentCore:
             return AgentTurn("Onay bekleyen bir işlem yok.", [])
         pending, self.pending = self.pending, None
         for call in [pending.tool_call, *pending.remaining_calls]:
+            if call.call_id in self._call_tasks:
+                self.tasks.finish(self._call_tasks[call.call_id], "cancelled")
             self._append_result(pending.messages, call, {"ok": False, "error": "Cancelled by user; not executed"})
         text = "Tamam, bekleyen işlemleri iptal ettim."
         pending.messages.append({"role": "assistant", "content": text})
@@ -180,6 +206,11 @@ class AgentCore:
                 calls = list(reply.tool_calls)
             batch, calls = calls, []
             for index, call in enumerate(batch):
+                if any(result.get("outcome") == "unknown" for result in results):
+                    result = {"ok": False, "error": "Previous execution outcome unknown; no further actions this turn. Ask user before any retry."}
+                    results.append(result)
+                    self._append_result(messages, call, result)
+                    continue
                 if model_steps >= 4 or len(results) >= 8:
                     result = {"ok": False, "error": "Tool budget exhausted; not executed"}
                     results.append(result)
@@ -208,7 +239,7 @@ class AgentCore:
                 turn = self._dispatch(call, confirmed=False)
                 results.extend(turn.tool_results)
                 if turn.confirmation_required:
-                    self.pending = PendingAction(call, list(messages), user_message,
+                    self.pending = PendingAction(deepcopy(call), list(messages), user_message,
                                                  batch[index + 1:], results, model_steps, sol_delegations)
                     return AgentTurn(turn.message, results, True)
                 for result in turn.tool_results:
@@ -219,6 +250,17 @@ class AgentCore:
         return AgentTurn(fallback, results)
 
     def _dispatch(self, call: ToolCall, confirmed: bool) -> AgentTurn:
+        if call.name in {"get_devices", "get_task_status"}:
+            error = self.registry._validate({"properties": {}, "additionalProperties": False}, call.arguments)
+            if error:
+                return AgentTurn("Geçersiz istek.", [{"ok": False, "error": error}])
+            if call.name == "get_devices":
+                for transport in self.transports.values():
+                    transport.refresh()
+                result = {"ok": True, "devices": self.devices.list_public()}
+            else:
+                result = {"ok": True, "tasks": self.tasks.recent()}
+            return AgentTurn("", [result])
         entry = self.registry.get(call.name)
         if not entry:
             result = {"ok": False, "error": f"Unknown tool: {call.name}"}
@@ -230,22 +272,34 @@ class AgentCore:
         decision = self.permissions.decide(spec, call.arguments)
         if not decision.allowed:
             return AgentTurn("Bu işlem izin politikası tarafından engellendi.", [{"ok": False, "error": decision.reason}])
+        target_device = call.arguments.get("device_id") or self.local_agent.device.device_id
+        if call.call_id not in self._call_tasks:
+            self._call_tasks[call.call_id] = self.tasks.create(call.name, target_device)
+        task_id = self._call_tasks[call.call_id]
         if decision.requires_confirmation and not confirmed:
             detail = json.dumps(call.arguments, ensure_ascii=False)
             target = call.arguments.get("device_id") or self.local_agent.device.display_name
             return AgentTurn(f"{target}: {call.name} {detail}. Onaylıyor musun? (evet/hayır)", [], True)
         # A user/model may name a registered target. Without one, local is the
         # safe deterministic default rather than an arbitrary stale registry row.
-        target_device = call.arguments.get("device_id") or self.local_agent.device.device_id
+        transport = self.transports.get(target_device)
+        if transport:
+            transport.refresh()
         device = self.devices.find_capable(spec.capability, preferred_device=target_device)
         if not device:
+            self.tasks.finish(task_id, "failed")
             return AgentTurn("Bu işlemi yapabilecek çevrimiçi bir cihaz yok.", [{"ok": False, "error": f"No device for {spec.capability}"}])
-        if device.device_id != self.local_agent.device.device_id:
+        if not transport:
+            self.tasks.finish(task_id, "failed")
             return AgentTurn("Uzak cihaz ajanı henüz bu oturumda bağlı değil.", [{"ok": False, "error": "remote agent unavailable"}])
+        if not self.tasks.claim(task_id):
+            return AgentTurn("Bu işlem tekrar çalıştırılmadı.", [{"ok": False, "task_id": task_id, "error": "Action already claimed; not replayed"}])
         try:
-            result = self.local_agent.execute(spec.capability, call.arguments)
+            result = transport.execute(spec.capability, call.arguments, confirmed=confirmed, request_id=task_id)
         except Exception as exc:
-            result = {"ok": False, "error": type(exc).__name__}
+            result = {"ok": False, "outcome": "unknown", "error": type(exc).__name__}
+        state = "unknown" if result.get("outcome") == "unknown" else "succeeded" if result.get("ok") else "failed"
+        self.tasks.finish(task_id, state)
         self._log("tool_dispatched", tool=call.name, capability=spec.capability, device=device.device_id, ok=result.get("ok"))
         return AgentTurn("", [result])
 
@@ -260,7 +314,22 @@ class AgentCore:
             self._log("memory_write_failed", error=type(exc).__name__)
 
     def _model_tools(self) -> list[dict]:
-        return [*self.registry.openai_schemas(), SOL_TOOL_SCHEMA]
+        return [*self.registry.openai_schemas(), *CORE_TOOL_SCHEMAS, SOL_TOOL_SCHEMA]
+
+    def attach_transport(self, transport: DeviceTransport):
+        """Trusted host wiring only. Never exposed to the model as a tool."""
+        device_id = transport.device.device_id
+        if device_id in self.transports:
+            raise ValueError("Device already attached")
+        self.devices.register(transport.device)
+        self.transports[device_id] = transport
+
+    def close(self):
+        if self.pending:
+            self.reject_pending()
+        for transport in self.transports.values():
+            transport.close()
+        self.tasks.close()
 
     @staticmethod
     def _log(event: str, **data: Any) -> None:
