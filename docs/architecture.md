@@ -92,9 +92,11 @@ its target and resulting playback state as unverified.
 
 Validation for the process-boundary increment: 48 tests, actual local worker
 read-only round trips, and Windows PowerShell 5.1 startup/inspection/quit.
-The earlier in-process version passed live Luna/Sol and volume smoke tests;
-the new process version has not yet passed a live model test (external metadata
-transmission requires approval). Volume also passed a local real-worker check
+After explicit user authorization, the process version passed all seven live
+model smoke cases: greeting, system info, device listing, battery, action
+receipts, unsupported-song handling and Luna -> Sol -> Luna synthesis.
+The live test blocked OS mutations and private context retrieval; test
+conversations and action receipts were not persisted. Volume also passed a local real-worker check
 with its original level restored. Other OS-mutating adapters are mocked in
 current regression coverage. Voice, remote network transport, Spotify track selection
 and Tauri remain future work.

@@ -106,9 +106,13 @@ No hypothetical capability is advertised as operational.
 - Windows PowerShell 5.1 startup, local inspection commands and quit passed.
 - Actual volume round trip through the separate worker passed at the current
   level; the original exact volume was restored and the worker exited.
-- No new live OpenAI test is claimed: the external test was blocked by approval
-  review because it would send device and task metadata. The opt-in smoke
-  script documents and exercises that path only after authorization.
+- After explicit user authorization for device/task metadata transmission,
+  all seven live OpenAI smoke cases passed on 2026-09-19: greeting, system
+  information through the worker, device listing, battery through the worker,
+  action receipts, unsupported song without unrelated playback, and
+  Luna -> Sol -> Luna synthesis. The test blocked OS mutations and private
+  context retrieval and did not persist test conversations or action receipts.
+  This verifies the exercised paths, not every possible model decision.
 - Process liveness is local availability, not a remote heartbeat or Windows
   service health check. No Windows startup installation has been performed.
 
