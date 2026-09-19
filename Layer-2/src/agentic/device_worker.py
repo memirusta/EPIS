@@ -1,5 +1,6 @@
 """Private stdio device worker. No model clients, memory retrieval or network listener."""
 import json
+import hashlib
 from pathlib import Path
 import platform
 import re
@@ -17,18 +18,22 @@ MAX_FRAME = 65536
 
 
 class DeviceWorker:
-    def __init__(self, registry=None):
+    def __init__(self, registry=None, receipt_store=None, allowed_capabilities=None):
         self.registry = registry or build_local_registry()
         self.local = LocalDeviceAgent(DeviceRegistry(), self.registry.dispatch_capability,
                                       self.registry.capabilities())
         self.permissions = PermissionEngine()
-        self.receipts = {}
+        self.receipts = receipt_store if receipt_store is not None else {}
+        if allowed_capabilities is not None:
+            self.local.device.capabilities.intersection_update(allowed_capabilities)
 
     def handle(self, message):
         if not isinstance(message, dict) or message.get("version") != PROTOCOL_VERSION:
             return {"ok": False, "error": "Unsupported protocol"}
         if message.get("operation") == "describe":
             return {"ok": True, "device": self.local.device.to_dict()}
+        if message.get("operation") == "heartbeat":
+            return {"ok": True}
         if message.get("operation") != "execute":
             return {"ok": False, "error": "Unsupported operation"}
         allowed = {"version", "operation", "id", "device_id", "capability", "arguments", "confirmed", "deadline"}
@@ -39,14 +44,8 @@ class DeviceWorker:
         request_id = message.get("id")
         if not isinstance(request_id, str) or not re.fullmatch(r"[a-zA-Z0-9-]{1,64}", request_id):
             return {"ok": False, "error": "Invalid command id"}
-        fingerprint = json.dumps({k: v for k, v in message.items() if k != "deadline"}, sort_keys=True)
-        if request_id in self.receipts:
-            previous, result = self.receipts[request_id]
-            if previous != fingerprint:
-                return {"ok": False, "error": "Command id reused with different payload"}
-            return result
-        if len(self.receipts) >= 4096:
-            return {"ok": False, "error": "Worker session command limit reached; restart explicitly"}
+        fingerprint = hashlib.sha256(json.dumps(
+            {k: v for k, v in message.items() if k != "deadline"}, sort_keys=True).encode()).hexdigest()
         deadline = message.get("deadline")
         if type(deadline) not in (int, float) or not time.time() <= deadline <= time.time() + 60:
             return {"ok": False, "error": "Expired or invalid command deadline"}
@@ -55,6 +54,8 @@ class DeviceWorker:
         capability = message.get("capability")
         if not isinstance(capability, str):
             return {"ok": False, "error": "Invalid capability"}
+        if capability not in self.local.device.capabilities:
+            return {"ok": False, "error": "Capability not granted to this device"}
         entry = self.registry.for_capability(capability)
         if not entry or platform.system().lower() not in entry[0].platforms:
             return {"ok": False, "error": "Capability unavailable"}
@@ -68,9 +69,22 @@ class DeviceWorker:
         decision = self.permissions.decide(spec, message["arguments"])
         if not decision.allowed or (decision.requires_confirmation and message["confirmed"] is not True):
             return {"ok": False, "error": "Device policy requires Core approval"}
+        # Reauthorize even cached results after re-enrollment with narrower scope.
+        if request_id in self.receipts:
+            previous, result = self.receipts[request_id]
+            if previous != fingerprint:
+                return {"ok": False, "error": "Command id reused with different payload"}
+            return result
+        if len(self.receipts) >= 4096:
+            return {"ok": False, "error": "Device receipt limit reached; explicit maintenance required"}
         # Reserve before the OS boundary. No replay if the handler fails ambiguously.
         unknown = {"ok": False, "outcome": "unknown", "error": "Execution outcome unknown; do not retry automatically"}
-        self.receipts[request_id] = (fingerprint, unknown)
+        if hasattr(self.receipts, "reserve"):
+            if not self.receipts.reserve(request_id, fingerprint, unknown):
+                previous, result = self.receipts[request_id]
+                return result if previous == fingerprint else {"ok": False, "error": "Command id reused with different payload"}
+        else:
+            self.receipts[request_id] = (fingerprint, unknown)
         result = self.registry.dispatch(spec.name, message["arguments"])
         self.receipts[request_id] = (fingerprint, result)
         return result

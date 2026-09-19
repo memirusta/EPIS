@@ -8,6 +8,6 @@ pywin32
 fastapi
 uvicorn[standard]
 requests
-cryptography
+cryptography>=42
 uiautomation
 pycaw

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from context_builder import ContextBuilder
 from epis_core import build_system_prompt
@@ -27,14 +28,20 @@ def create_core() -> AgentCore:
     state_path = os.path.join(memory.memory_dir, "devices.json")
     devices = DeviceRegistry(state_path)
     transport_mode = os.getenv("EPIS_DEVICE_TRANSPORT", "stdio").lower()
-    if transport_mode not in {"stdio", "inprocess"}:
-        raise ValueError("EPIS_DEVICE_TRANSPORT must be stdio or inprocess")
+    if transport_mode not in {"stdio", "inprocess", "paired"}:
+        raise ValueError("EPIS_DEVICE_TRANSPORT must be stdio, inprocess or paired")
     tasks = TaskStore(os.path.join(memory.memory_dir, "agent_tasks.db"))
     local_agent = None
     try:
         # In-process remains explicit compatibility, never a silent fallback.
-        local_agent = (StdioDeviceAgent(devices) if transport_mode == "stdio" else
-                       LocalDeviceAgent(devices, registry.dispatch_capability, registry.capabilities()))
+        if transport_mode == "paired":
+            from .paired_transport import PairedLocalAgent
+            default_profile = Path(__file__).resolve().parents[3] / ".epis-runtime" / "pairing"
+            local_agent = PairedLocalAgent(devices, os.getenv("EPIS_PAIRING_DIR") or default_profile)
+        elif transport_mode == "stdio":
+            local_agent = StdioDeviceAgent(devices)
+        else:
+            local_agent = LocalDeviceAgent(devices, registry.dispatch_capability, registry.capabilities())
         return AgentCore(
             luna=OpenAILunaClient(),
             system_prompt=build_system_prompt(protocol="agentic", include_private=mode == "local"),

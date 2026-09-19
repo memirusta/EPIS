@@ -236,6 +236,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="EPIS")
     parser.add_argument("--env-file", help="Load an existing local environment file without copying secrets")
     parser.add_argument("--debug", action="store_true", help="Show diagnostic logs in the terminal")
+    parser.add_argument("--device-transport", choices=["stdio", "paired", "inprocess"], help="Override device transport for this run")
+    parser.add_argument("--pairing-dir", help="Existing local mTLS pairing profile")
     parser.add_argument(
         "--legacy",
         action="store_true",
@@ -247,6 +249,10 @@ def main(argv=None):
     if args.env_file and not os.path.isfile(env_path):
         parser.error("Environment file not found")
     load_dotenv(env_path, override=False)
+    if args.device_transport:
+        os.environ["EPIS_DEVICE_TRANSPORT"] = args.device_transport
+    if args.pairing_dir:
+        os.environ["EPIS_PAIRING_DIR"] = os.path.abspath(args.pairing_dir)
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
