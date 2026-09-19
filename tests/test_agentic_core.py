@@ -41,7 +41,16 @@ class FakeMemory:
         self.rows.append((args, kwargs))
 
 
-def build_core(replies, risk=RiskClass.GREEN.value):
+class FakeSol:
+    def __init__(self):
+        self.calls = []
+
+    def analyze(self, task, context=None):
+        self.calls.append((task, context))
+        return {"ok": True, "model_used": "gpt-5.6-sol", "result": "Sol analysis"}
+
+
+def build_core(replies, risk=RiskClass.GREEN.value, sol=None):
     registry = ToolRegistry()
     registry.register(
         ToolSpec(
@@ -59,7 +68,7 @@ def build_core(replies, risk=RiskClass.GREEN.value):
     return AgentCore(
         luna=FakeLuna(replies), system_prompt="EPIS identity", context_builder=FakeContext(),
         memory=FakeMemory(), registry=registry, devices=devices, local_agent=local,
-        permissions=PermissionEngine(),
+        permissions=PermissionEngine(), sol=sol,
     )
 
 
@@ -116,6 +125,20 @@ class AgentCoreTests(unittest.TestCase):
                 os.environ.pop("EPIS_LUNA_CONTEXT_MODE", None)
             else:
                 os.environ["EPIS_LUNA_CONTEXT_MODE"] = old
+
+    def test_luna_delegates_complex_reasoning_to_sol_then_synthesizes(self):
+        sol = FakeSol()
+        core = build_core([
+            LunaReply(tool_calls=[ToolCall(
+                "call-sol", "delegate_to_sol",
+                {"task": "Review this repository architecture", "reason": "repository_review"},
+            )]),
+            LunaReply(text="Mimari incelemenin sonucu bu."),
+        ], sol=sol)
+        turn = core.handle("Bu repository mimarisini derin incele")
+        self.assertEqual(turn.message, "Mimari incelemenin sonucu bu.")
+        self.assertEqual(turn.tool_results[0]["model_used"], "gpt-5.6-sol")
+        self.assertEqual(sol.calls[0][1]["reason"], "repository_review")
 
 
 if __name__ == "__main__":

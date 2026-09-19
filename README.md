@@ -78,13 +78,15 @@ cp Layer-3/keys.env.example Layer-3/keys.env
 
 Fill only the providers/integrations you intend to use, then start the UI using the scripts in `scripts/` or the project launcher.
 
-For the 0.1 text agent, configure a Luna endpoint in `Layer-3/keys.env` (or process environment):
+For the 0.1 text agent, configure the direct OpenAI Luna/Sol models in the ignored `Layer-3/keys.env` file (or process environment):
 
 ```text
-LUNA_MODEL=qwen3.5:9b
-LUNA_BASE_URL=http://localhost:11434/v1
-# LUNA_API_KEY=...  # only when the selected endpoint requires it
-# Set EPIS_LUNA_CONTEXT_MODE=minimal for an untrusted/hosted frontend endpoint.
+OPENAI_API_KEY=...
+LUNA_MODEL=gpt-5.6-luna
+LUNA_REASONING_EFFORT=low
+SOL_MODEL=gpt-5.6-sol
+SOL_REASONING_EFFORT=high
+EPIS_LUNA_CONTEXT_MODE=minimal
 ```
 
 Then run:
@@ -97,6 +99,9 @@ Try `Bilgisayarın durumu ne?`, `Spotify'ı aç`, `Sesi 20 yap`, or `Medyayı du
 The observed tool result is returned to Luna before EPIS answers. The legacy
 terminal flow remains available as `python main.py --legacy`; existing
 web/WhatsApp and Kairos paths stay on their compatibility path during migration.
+Luna delegates at most one complex analysis/coding/planning/repository task per
+turn to Sol, then synthesizes Sol's result back into EPIS's voice. Ordinary
+conversation and local device actions stay on Luna.
 
 See [`docs/adr/0001-agentic-pivot.md`](docs/adr/0001-agentic-pivot.md) for the migration map, permissions, cloud/device boundary, and follow-up milestones.
 

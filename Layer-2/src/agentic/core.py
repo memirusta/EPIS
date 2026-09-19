@@ -45,6 +45,27 @@ class SolDelegator:
         )
 
 
+SOL_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "delegate_to_sol",
+        "description": (
+            "Delegate only complex analysis, coding, planning, repository review, "
+            "or long-chain reasoning to Sol. Do not use for normal conversation or local device tools."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "Self-contained task for Sol, with only necessary context."},
+                "reason": {"type": "string", "enum": ["analysis", "coding", "planning", "repository_review"]},
+            },
+            "required": ["task", "reason"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
 class AgentCore:
     """Coordinates Luna, local context, device routing, and controlled tools.
 
@@ -82,7 +103,10 @@ class AgentCore:
         system = self.system_prompt + "\n\n# AGENT SINIRI\n" + (
             "Tool sonucu görmeden işlem yapılmış gibi konuşma. Tool çağrıları yalnızca "
             "öneridir; Core izin ve cihaz kontrolünden geçirir. Tool sonucu geldikten sonra "
-            "kullanıcıya doğal, kısa ve tek EPIS sesiyle yanıt ver."
+            "kullanıcıya doğal, kısa ve tek EPIS sesiyle yanıt ver. Karmaşık analiz, coding, "
+            "planning veya repository inceleme gerekiyorsa delegate_to_sol kullan; normal "
+            "sohbet ve yerel cihaz araçları için Sol'u çağırma. Sol sonucunu doğrudan yapıştırma, "
+            "EPIS'in tutarlı sesiyle sentezle."
         )
         if context:
             system += "\n\n# ANLIK BAGLAM\n" + context
@@ -107,14 +131,28 @@ class AgentCore:
 
     def _run(self, messages: list[dict], user_message: str) -> AgentTurn:
         results: list[dict] = []
+        sol_delegations = 0
         for _ in range(3):
-            reply = self.luna.complete(messages, self.registry.openai_schemas())
+            reply = self.luna.complete(messages, self._model_tools())
             messages.append(reply.as_assistant_message())
             if not reply.tool_calls:
                 text = reply.text or "Yanıt tamamlanamadı; tekrar dener misin?"
                 self._remember(messages, user_message, text)
                 return AgentTurn(text, results)
             for call in reply.tool_calls:
+                if call.name == "delegate_to_sol":
+                    if sol_delegations >= 1:
+                        result = {"ok": False, "error": "Sol delegation limit reached for this turn"}
+                    else:
+                        sol_delegations += 1
+                        task = call.arguments.get("task", "")
+                        if not isinstance(task, str) or not task.strip():
+                            result = {"ok": False, "error": "Sol task must be non-empty"}
+                        else:
+                            result = self.delegate_to_sol(task.strip(), {"reason": call.arguments.get("reason")})
+                    results.append(result)
+                    messages.append({"role": "tool", "tool_call_id": call.call_id, "content": json.dumps(result, ensure_ascii=False)})
+                    continue
                 turn = self._dispatch_and_respond(call, messages, user_message, confirmed=False, defer_response=True)
                 results.extend(turn.tool_results)
                 if turn.confirmation_required:
@@ -150,7 +188,7 @@ class AgentCore:
         if defer_response:
             return AgentTurn("", [result])
         messages = [*messages, {"role": "tool", "tool_call_id": call.call_id, "content": json.dumps(result, ensure_ascii=False)}]
-        reply = self.luna.complete(messages, self.registry.openai_schemas())
+        reply = self.luna.complete(messages, self._model_tools())
         text = reply.text or ("İşlem tamamlandı." if result.get("ok") else "İşlem tamamlanamadı.")
         messages.append(reply.as_assistant_message())
         self._remember(messages, user_message, text)
@@ -163,16 +201,19 @@ class AgentCore:
         except Exception as exc:
             self._log("memory_write_failed", error=str(exc))
 
+    def _model_tools(self) -> list[dict]:
+        return [*self.registry.openai_schemas(), SOL_TOOL_SCHEMA]
+
     @staticmethod
     def _context_for_luna(context: str) -> str:
         """Keep remote-frontline exposure deliberately small when requested.
 
-        `local` is the MVP default because the documented Luna endpoint is
-        localhost. Configure `EPIS_LUNA_CONTEXT_MODE=minimal` before using an
-        untrusted/hosted frontline endpoint; privacy-aware Sol routing remains
-        separate and continues to use PrivacyFilter.
+        `minimal` is the safe default for direct OpenAI Luna: it sends time
+        context but not retrieved private memory. `local` remains an explicit
+        opt-in for a trusted local/controlled endpoint. Privacy-aware Sol
+        routing remains separate and continues to use PrivacyFilter.
         """
-        if os.getenv("EPIS_LUNA_CONTEXT_MODE", "local").lower() != "minimal":
+        if os.getenv("EPIS_LUNA_CONTEXT_MODE", "minimal").lower() != "minimal":
             return context
         start = context.find("## ZAMAN")
         if start < 0:

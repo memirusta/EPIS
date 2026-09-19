@@ -7,12 +7,12 @@ Layer-2 / Layer-3 path, not a replacement for memory or proactive services.
 
 from .core import AgentCore, AgentTurn
 from .devices import Device, DeviceRegistry, LocalDeviceAgent
-from .luna import LunaClient, OpenAICompatibleLunaClient
+from .luna import LunaClient, OpenAICompatibleLunaClient, OpenAILunaClient, OpenAISolClient
 from .permissions import PermissionEngine, PermissionDecision, RiskClass
 from .tools import ToolRegistry, build_local_registry
 
 __all__ = [
     "AgentCore", "AgentTurn", "Device", "DeviceRegistry", "LocalDeviceAgent",
-    "LunaClient", "OpenAICompatibleLunaClient", "PermissionEngine",
+    "LunaClient", "OpenAICompatibleLunaClient", "OpenAILunaClient", "OpenAISolClient", "PermissionEngine",
     "PermissionDecision", "RiskClass", "ToolRegistry", "build_local_registry",
 ]

@@ -36,7 +36,7 @@ admin, or delete capability in this MVP.
 | `MemoryManager` | Preserve directly | Encrypted local lifetime data and state stay local. |
 | `ContextBuilder` | Preserve directly | It remains Luna's per-turn context retrieval. |
 | `PrivacyFilter` | Preserve for Sol/external analysis | `EpisRouter` still pseudonymizes before Layer-3. |
-| `EpisRouter` / `api_clients.py` | Adapt behind `SolDelegator` | Heavy analysis is explicit; ordinary local tools never use Sol. |
+| `EpisRouter` / `api_clients.py` | Preserve for legacy/nightly | The new direct Sol adapter is separate; ordinary local tools never use Sol. |
 | `epis_core.py` / `Layer1Engine` | Legacy compatibility | UI, WhatsApp, Kairos formatting and old terminal mode still use it. |
 | `Kairos`, proactive delivery, nightly recalculation | Preserve | They continue producing and consuming local state. |
 | `sensors.py` | Preserve | Local signal producer; not a remote control mechanism. |
@@ -45,11 +45,16 @@ admin, or delete capability in this MVP.
 ## 0.1 implementation boundary
 
 `Layer-2/src/agentic/` adds a new runtime without changing private storage
-formats. The Luna adapter accepts `LUNA_MODEL`, `LUNA_BASE_URL`, and optional
-`LUNA_API_KEY`, and works with Ollama/vLLM/hosted OpenAI-compatible services.
-For a hosted or otherwise untrusted Luna endpoint, set
-`EPIS_LUNA_CONTEXT_MODE=minimal`; it sends only time context rather than
-retrieved memory. The documented local-Ollama MVP defaults to `local`.
+formats. The default frontline is direct OpenAI `gpt-5.6-luna`; the specialist
+is direct OpenAI `gpt-5.6-sol`. Both use `OPENAI_API_KEY` from the ignored
+runtime environment. Luna exposes Sol as a model-service delegation tool only
+for complex analysis, coding, planning, and repository review, with at most one
+delegation per turn. Sol's output returns to Luna for EPIS-voice synthesis.
+
+Because Luna is cloud inference, `EPIS_LUNA_CONTEXT_MODE=minimal` is the safe
+default: it sends time context but not retrieved private memory. `local` is an
+explicit opt-in for a controlled endpoint. Sol delegation passes only Luna's
+self-contained task through the existing local privacy filter.
 
 The initial Windows registry contains exactly five tools: `open_app`,
 `close_app`, `set_volume`, `media_play_pause`, and `get_system_info`.

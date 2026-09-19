@@ -7,11 +7,11 @@ import os
 from context_builder import ContextBuilder
 from epis_core import build_system_prompt
 from memory_manager import MemoryManager
-from router import EpisRouter
+from privacy import PrivacyFilter
 
-from .core import AgentCore, SolDelegator
+from .core import AgentCore
 from .devices import DeviceRegistry, LocalDeviceAgent
-from .luna import OpenAICompatibleLunaClient
+from .luna import OpenAILunaClient, OpenAISolClient
 from .permissions import PermissionEngine
 from .tools import build_local_registry
 
@@ -24,7 +24,7 @@ def main() -> int:
     # The local agent executes only registry-owned, capability-scoped handlers.
     local_agent = LocalDeviceAgent(devices, lambda capability, args: _dispatch_capability(registry, capability, args))
     core = AgentCore(
-        luna=OpenAICompatibleLunaClient(),
+        luna=OpenAILunaClient(),
         system_prompt=build_system_prompt(),
         context_builder=ContextBuilder(memory),
         memory=memory,
@@ -32,9 +32,7 @@ def main() -> int:
         devices=devices,
         local_agent=local_agent,
         permissions=PermissionEngine(),
-        # No automatic calls: this only makes the existing privacy-aware
-        # Layer-3 route available to an explicit future Luna/Core policy.
-        sol=SolDelegator(EpisRouter()),
+        sol=OpenAISolClient(PrivacyFilter()),
     )
     print("EPIS 0.1 — text agent (Luna + deterministic Core)")
     print("Çıkış: quit | Onay beklerken: evet / hayır")

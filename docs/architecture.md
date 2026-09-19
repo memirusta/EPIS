@@ -19,7 +19,7 @@ flowchart LR
 ```
 
 ## Luna — frontline (Layer-1 compatibility)
-The user-facing conversational model. It receives a context package containing
+The user-facing model is direct OpenAI `gpt-5.6-luna`. It receives a context package containing
 relevant memory, identity, values, and current state. Luna can propose a named,
 schema-validated tool call; it cannot grant its own permissions. After Core
 returns an observed result, Luna delivers the final response in EPIS's single
@@ -32,10 +32,12 @@ sensor integration, and nightly processing. It is intentionally not an LLM and
 is the security boundary. The 0.1 registry has no arbitrary shell capability.
 
 ## Sol — specialist model pool (Layer-3 compatibility)
-Replaceable external models for explicitly delegated expensive or specialized
+The default specialist is direct OpenAI `gpt-5.6-sol`, behind a replaceable
+interface, for explicitly delegated expensive or specialized
 tasks such as reasoning, code, repository analysis, planning, visual analysis,
-and nightly synthesis. A normal local tool call does not go to Sol. The existing
-privacy layer minimizes personal data before an external call.
+and nightly synthesis. A normal local tool call does not go to Sol. Core permits
+at most one Sol delegation per turn, and the existing privacy layer minimizes
+personal data before the external call.
 
 ## Identity continuity
 The architecture treats models as replaceable computation. Stable values, personality definitions, long-term memory, and approved learning live outside model weights.
