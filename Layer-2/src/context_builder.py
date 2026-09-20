@@ -98,6 +98,10 @@ class ContextBuilder:
             return False
         return self._wants_screen_daily(msg_low) or self._wants_screen_live(msg_low)
 
+    def build_minimal(self) -> str:
+        """Time only: never read memory, sensors, screen or phone in this path."""
+        return self._time_context()
+
     def build(self, user_message: str = "") -> str:
         """Bağlam bloğunu string olarak döner. Hata olursa en azından zamanı verir."""
         msg_low = (user_message or "").lower()

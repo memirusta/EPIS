@@ -1,4 +1,5 @@
 # Secrets / credentials
+.epis-runtime/
 Layer-3/keys.env
 Layer-3/epis.key
 .env
@@ -13,6 +14,8 @@ Layer-1/identity/epis_self.json
 Layer-1/memory/*.json
 Layer-1/memory/*.jsonl
 Layer-1/memory/*.db
+Layer-1/memory/agent_tasks.db.lock
+Layer-1/memory/agent_tasks.db-journal
 Layer-1/habits/habits.json
 Layer-1/habits/habit_log.json
 GadgetBridge/
