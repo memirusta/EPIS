@@ -219,13 +219,13 @@ def register_desktop_tools(registry):
     device = {"device_id": {"type": "string"}}
     def schema(properties, required=()):
         return {"type": "object", "properties": {**properties, **device}, "required": list(required), "additionalProperties": False}
-    registry.register(ToolSpec("discover_apps", "Find installed desktop app names and opaque IDs. Requires approval before names go to the model; no paths returned.",
+    registry.register(ToolSpec("discover_apps", "FIRST STEP to open any app not in open_app, e.g. Nebula. Call this function immediately; Core pauses it to ask approval. Do not ask approval in chat. Returns exact app_id/app_name; no paths.",
         schema({"query": {"type": "string", "maxLength": 100}}), "apps.discover", "yellow", True,
         confirmation_notice="Eşleşen uygulama adları model API'sine gönderilecek; dosya yolları gönderilmez."), catalog.discover)
     registry.register(ToolSpec("launch_discovered_app", "Launch an exact discovered app ID/name after approval. No paths, arguments, shell or scripts accepted.",
         schema({"app_id": {"type": "string", "maxLength": 24}, "app_name": {"type": "string", "maxLength": 100}}, ("app_id", "app_name")),
         "apps.launch", "yellow", True), catalog.launch)
-    registry.register(ToolSpec("list_windows", "List top-level windows by process name, without titles/content. Requires approval before sending names to the model.",
+    registry.register(ToolSpec("list_windows", "FIRST STEP to minimize/maximize/restore/focus/close a window. Call this function immediately; Core asks approval before collecting process names. Do not ask approval in chat. No titles/content.",
         schema({"app_name": {"type": "string", "maxLength": 100}}), "windows.list", "yellow", True,
         confirmation_notice="Eşleşen açık uygulama adları model API'sine gönderilecek; pencere başlıkları ve içerikleri okunmaz."), windows.list_windows)
     selection = schema({"window_id": {"type": "string", "maxLength": 32}, "app_name": {"type": "string", "maxLength": 100}}, ("window_id", "app_name"))

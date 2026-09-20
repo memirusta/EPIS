@@ -76,7 +76,7 @@ def interact(core) -> int:
     print("Bu oturumda yazdıkların ve araç sonuçları model API'sine gönderilir.")
     if os.getenv("EPIS_LUNA_CONTEXT_MODE", "minimal").lower() == "minimal":
         print("Bağlam: minimal — eski hafıza ve sensörler okunmaz; yeni konuşma yerelde kaydedilir.")
-    print("Çıkış: quit | Onay: evet / hayır (120 sn) | /devices /tasks /tools")
+    print("Çıkış: quit | Onay: evet / hayır (120 sn) | /help /devices /tasks /tools /workspace")
     while True:
         try:
             text = input("Sen: ").strip()
@@ -88,6 +88,21 @@ def interact(core) -> int:
         if text.lower() in {"quit", "exit", "çık", "cik", "çıkış", "cikis"}:
             print("EPIS: Görüşürüz.")
             return 0
+        if text.lower() == "/help":
+            print("Örnekler: Bilgisayarın durumu ne? | Spotify'ı duraklat | Sesi kapat | Parlaklığı 50 yap")
+            print("Nebula'yı bul ve aç | Nebula penceresini küçült | İndirilenler klasörünü aç")
+            print("EPIS çalışma klasöründe Deneme klasörü oluştur | Ses ayarlarını aç")
+            print("/workspace: dosya deneme alanı | /cancel: bekleyen onayı iptal et | quit: çık")
+            print("Dosya içeriği okuma/yazma/silme, shell, admin ve gerçek Codex kontrolü yok.")
+            continue
+        if text.lower() == "/workspace":
+            from .filesystem import known_root
+            print(f"Yerel deneme alanı: {known_root('workspace')}")
+            print("İlk izinli klasör işleminde oluşturulur. Bu yol model API'sine gönderilmedi.")
+            continue
+        if text.lower() == "/cancel":
+            print(f"EPIS: {core.reject_pending().message}")
+            continue
         if text.lower() in {"/devices", "/tasks", "/tools"}:
             if text.lower() == "/devices":
                 for transport in core.transports.values():

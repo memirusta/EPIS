@@ -237,7 +237,7 @@ def build_local_registry() -> ToolRegistry:
     registry = ToolRegistry()
     device_property = {"device_id": {"type": "string", "description": "Optional registered target device id; omit for this computer."}}
     app_schema = {"type": "object", "properties": {"app": {"type": "string", "enum": sorted(_APPS)}, **device_property}, "required": ["app"], "additionalProperties": False}
-    registry.register(ToolSpec("open_app", "Open an approved local app.", app_schema, "app.open"), _open_app)
+    registry.register(ToolSpec("open_app", "Open ONLY spotify, notepad or calculator. For ANY other app (including Nebula), call discover_apps immediately; Core handles approval.", app_schema, "app.open"), _open_app)
     registry.register(ToolSpec("close_app", "Close an approved local app after confirmation.", app_schema, "app.close", RiskClass.YELLOW.value, True), _close_app)
     registry.register(ToolSpec("set_volume", "Set system volume to an integer percentage.", {"type": "object", "properties": {"level": {"type": "integer", "minimum": 0, "maximum": 100}, **device_property}, "required": ["level"], "additionalProperties": False}, "audio.volume"), _set_volume)
     registry.register(ToolSpec("media_play_pause", "Toggle global Windows media playback. Cannot target Spotify, select a song, or guarantee play/pause state.", {"type": "object", "properties": device_property, "additionalProperties": False}, "media.play_pause"), _media_play_pause)
@@ -252,4 +252,10 @@ def build_local_registry() -> ToolRegistry:
                               "browser.open_url", RiskClass.YELLOW.value, True), _open_url)
     from .desktop import register_desktop_tools
     register_desktop_tools(registry)
+    from .media import register_media_tools
+    from .filesystem import register_folder_tools
+    from .system_tools import register_system_tools
+    register_media_tools(registry)
+    register_folder_tools(registry)
+    register_system_tools(registry)
     return registry

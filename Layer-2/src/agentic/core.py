@@ -139,6 +139,11 @@ class AgentCore:
             "planning veya repository inceleme gerekiyorsa delegate_to_sol kullan; normal "
             "sohbet ve yerel cihaz araçları için Sol'u çağırma. Sol sonucunu doğrudan yapıştırma, "
             "EPIS'in tutarlı sesiyle sentezle."
+            " Kullanıcı desteklenen bir işlemi istediyse uygun tool çağrısını öner. "
+            "Onay gereken araç için ayrıca sohbetle 'onaylıyor musun' diye sorup turu bitirme: "
+            "tool çağrısını üret; Core işlemi DURDURUP kullanıcıdan evet/hayır alır. "
+            "Bu, izni atlamak değildir; onay UI'si yalnızca Core'un sorumluluğudur. "
+            "Araç argümanları belirsizse açıklayıcı soru sor. Desteklenmeyen işlemi desteklenmiş sayma."
         )
         if context:
             system += "\n\n# ANLIK BAGLAM\n" + context
