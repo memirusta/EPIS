@@ -74,6 +74,17 @@ between processes on this Windows computer; no off-machine endpoint or cloud
 deployment exists. Stdio remains the default. Memory/context and Luna/Sol
 interfaces are unchanged.
 
+[ADR 0004](adr/0004-desktop-capabilities.md) extends that same worker with eight
+bounded desktop capabilities: application discovery/launch and window
+listing/focus/minimize/maximize/restore/close. Inventories are approval-gated;
+window titles/content and app filesystem paths are not returned to the model.
+Selection expires and is revalidated, with ambiguous same-app windows refused.
+Paired scope must be explicitly enrolled; existing certificates are unchanged.
+The current registry has 17 device tools and the test suite passes 79 tests.
+Real local discovery, paired inventory permission/transport, and an owned
+temporary window's minimize/maximize/restore were checked without a model API.
+The older seven live model cases below are not new desktop E2E coverage.
+
 ## Text-loop reliability
 
 Legacy `build_system_prompt()` still produces the original JSON protocol.

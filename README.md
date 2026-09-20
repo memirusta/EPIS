@@ -135,6 +135,15 @@ Luna also has `get_devices` and `get_task_status` for conversational requests.
 now available in addition to the first five tools. App closing and URL opening
 require approval, valid for 120 seconds. Use only one CLI per checkout.
 
+Eight additional Windows tools provide approved installed-app discovery and
+launch, approved window listing, and focus/minimize/maximize/restore/close of an
+exact, short-lived window selection. App/process names require approval before
+being sent to the model; paths, window titles and document contents are not
+returned. Multiple windows from the same app are rejected rather than guessed.
+Existing paired certificates do not gain these capabilities automatically; see
+[ADR 0004](docs/adr/0004-desktop-capabilities.md) for explicit enrollment, limits
+and verification. The registry now contains 17 device tools.
+
 Interrupted actions are recorded as unknown and are not replayed automatically.
 The local journal contains metadata only, not command arguments or conversation
 bodies. See [ADR 0002](docs/adr/0002-local-device-process.md) for the process,
@@ -175,7 +184,7 @@ python scripts/smoke_agent.py --env-file D:\EPIS\Layer-3\keys.env
 
 The smoke accepts `--device-transport paired`. In paired mode, encrypted device
 tool receipts persist for deduplication; test conversation-memory writes and
-Core action-journal persistence are disabled. The 68-test suite includes real
+Core action-journal persistence are disabled. The 79-test suite includes real
 loopback TLS and Windows DPAPI checks; run it as the normal Windows user, not
 an account without a loaded DPAPI profile. No external API calls occur in the
 unit/integration suite.
