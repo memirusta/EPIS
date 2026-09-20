@@ -16,7 +16,7 @@ def main():
     parser.add_argument("--profile", type=Path, default=ROOT / ".epis-runtime" / "pairing")
     parser.add_argument("--device-id", default=socket.gethostname().lower())
     parser.add_argument("--capability", action="append", dest="capabilities")
-    parser.add_argument("--all-local-tools", action="store_true", help="Explicitly grant the nine known local tools, still subject to Core confirmation")
+    parser.add_argument("--all-local-tools", action="store_true", help="Explicitly grant the currently registered Windows tools, still subject to Core confirmation")
     args = parser.parse_args()
     if args.operation == "init-local":
         if args.all_local_tools and args.capabilities:

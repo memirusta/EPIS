@@ -20,6 +20,7 @@ class ToolSpec:
     risk_class: str = RiskClass.GREEN.value
     confirmation_required: bool = False
     platforms: tuple[str, ...] = ("windows",)
+    confirmation_notice: str = ""
 
     def openai_schema(self) -> dict:
         return {
@@ -249,4 +250,6 @@ def build_local_registry() -> ToolRegistry:
                               {"type": "object", "properties": {"url": {"type": "string", "maxLength": 2048}, **device_property},
                                "required": ["url"], "additionalProperties": False},
                               "browser.open_url", RiskClass.YELLOW.value, True), _open_url)
+    from .desktop import register_desktop_tools
+    register_desktop_tools(registry)
     return registry

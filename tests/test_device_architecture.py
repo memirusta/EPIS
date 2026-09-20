@@ -187,7 +187,7 @@ class DeviceArchitectureTests(unittest.TestCase):
 
     def test_new_registry_metadata(self):
         registry = build_local_registry()
-        self.assertEqual(len(registry.specs()), 9)
+        self.assertEqual(len(registry.specs()), 17)
         self.assertEqual(registry.get("open_url")[0].risk_class, "yellow")
         self.assertIn("system.battery", registry.capabilities("windows"))
         self.assertEqual(registry.capabilities("linux"), set())

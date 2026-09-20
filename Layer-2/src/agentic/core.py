@@ -279,7 +279,8 @@ class AgentCore:
         if decision.requires_confirmation and not confirmed:
             detail = json.dumps(call.arguments, ensure_ascii=False)
             target = call.arguments.get("device_id") or self.local_agent.device.display_name
-            return AgentTurn(f"{target}: {call.name} {detail}. Onaylıyor musun? (evet/hayır)", [], True)
+            notice = f" {spec.confirmation_notice}" if spec.confirmation_notice else ""
+            return AgentTurn(f"{target}: {call.name} {detail}.{notice} Onaylıyor musun? (evet/hayır)", [], True)
         # A user/model may name a registered target. Without one, local is the
         # safe deterministic default rather than an arbitrary stale registry row.
         transport = self.transports.get(target_device)
