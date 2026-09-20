@@ -142,7 +142,16 @@ being sent to the model; paths, window titles and document contents are not
 returned. Multiple windows from the same app are rejected rather than guessed.
 Existing paired certificates do not gain these capabilities automatically; see
 [ADR 0004](docs/adr/0004-desktop-capabilities.md) for explicit enrollment, limits
-and verification. The registry now contains 17 device tools.
+and verification. That increment contained 17 device tools.
+
+The current Windows trial has **30 device tools**. It adds explicit SMTC media
+play/pause per selected app, Spotify web search (not automatic playback), mute,
+brightness, system-drive space, fixed settings pages, approved screen locking,
+and bounded folder listing/opening/new-workspace-folder creation. `/help` shows
+examples, `/workspace` prints the local trial directory, `/cancel` rejects a
+pending approval. Existing paired profiles require explicit new enrollment for
+the wider scope. See [ADR 0005](docs/adr/0005-pc-control-trial.md) for setup,
+privacy, full verification evidence and intentional limits.
 
 Interrupted actions are recorded as unknown and are not replayed automatically.
 The local journal contains metadata only, not command arguments or conversation
@@ -157,7 +166,11 @@ only; `--debug` shows diagnostic events. Event logs are written to ignored
 Try `Bilgisayarın durumu ne?`, `Spotify'ı aç`, `Sesi 20 yap`, or `Medya oynat/duraklat tuşunu gönder`.
 The media tool is a global toggle: it cannot guarantee play versus pause,
 target Spotify, or search/select a specific track. EPIS explains this limitation
-for a song request without sending an unrelated playback signal.
+for a song request without sending an unrelated playback signal. The newer
+`list_media_sessions` / `control_media_session` tools can request explicit
+play/pause in Windows-exposed app sessions and report observed state. A named
+song can be searched using `search_spotify`; selecting and playing it is still
+not implemented.
 The observed tool result is returned to Luna before EPIS answers. The legacy
 terminal flow remains available as `python main.py --legacy`; existing
 web/WhatsApp and Kairos paths stay on their compatibility path during migration.
@@ -184,7 +197,7 @@ python scripts/smoke_agent.py --env-file D:\EPIS\Layer-3\keys.env
 
 The smoke accepts `--device-transport paired`. In paired mode, encrypted device
 tool receipts persist for deduplication; test conversation-memory writes and
-Core action-journal persistence are disabled. The 79-test suite includes real
+Core action-journal persistence are disabled. The 100-test suite includes real
 loopback TLS and Windows DPAPI checks; run it as the normal Windows user, not
 an account without a loaded DPAPI profile. No external API calls occur in the
 unit/integration suite.

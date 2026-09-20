@@ -85,6 +85,14 @@ Real local discovery, paired inventory permission/transport, and an owned
 temporary window's minimize/maximize/restore were checked without a model API.
 The older seven live model cases below are not new desktop E2E coverage.
 
+[ADR 0005](adr/0005-pc-control-trial.md) brings the registry to 30 device tools
+with targeted SMTC media, audio/display/system controls and bounded folder
+operations. 100 tests passed, plus ten live Luna cases using a synthetic transport;
+actual worker checks separately cover owned window operations, temporary folder
+operations, unchanged audio/brightness writes and system/media reads. Identity,
+memory defaults and background jobs are unchanged. The user trial precedes
+memory/context integration, Kairos, and later NC; no such services were enabled.
+
 ## Text-loop reliability
 
 Legacy `build_system_prompt()` still produces the original JSON protocol.
