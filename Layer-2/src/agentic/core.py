@@ -399,6 +399,56 @@ class AgentCore:
             or "Bu işlem devam etmeden önce onayını gerektiriyor."
         )
 
+    def _online_capabilities(self) -> set[str]:
+        """Refresh transports and return capabilities on live devices only."""
+        for transport in list(self.transports.values()):
+            try:
+                transport.refresh()
+            except Exception as exc:
+                self._log(
+                    "device_refresh_failed",
+                    error=type(exc).__name__,
+                )
+
+        capabilities: set[str] = set()
+        for device in self.devices.list_public():
+            if not device.get("online"):
+                continue
+            capabilities.update(device.get("capabilities") or [])
+        return capabilities
+
+    def _live_capability_manifest(self) -> dict:
+        """Small model-facing truth source for current device/tool availability."""
+        capabilities = self._online_capabilities()
+        tools = []
+        for spec in self.registry.specs():
+            if spec.capability not in capabilities:
+                continue
+            decision = self.permissions.decide(spec, {})
+            tools.append({
+                "name": spec.name,
+                "capability": spec.capability,
+                "risk": spec.risk_class,
+                "approval_required": bool(
+                    decision.requires_confirmation
+                ),
+            })
+
+        devices = []
+        for device in self.devices.list_public():
+            if not device.get("online"):
+                continue
+            devices.append({
+                "name": device.get("display_name"),
+                "platform": device.get("platform"),
+                "capabilities": device.get("capabilities") or [],
+            })
+
+        return {
+            "devices": devices,
+            "tools": tools,
+        }
+
     def handle(
         self,
         user_message: str,
@@ -506,6 +556,39 @@ class AgentCore:
 
                 "AraÃ§ argÃ¼manlarÄ± belirsizse aÃ§Ä±klayÄ±cÄ± soru sor. "
                 "Desteklenmeyen iÅŸlemi desteklenmiÅŸ sayma."
+            )
+        )
+
+        live_manifest = self._live_capability_manifest()
+        system += (
+            "\n\n# LIVE CAPABILITIES\n"
+            + json.dumps(
+                live_manifest,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + (
+                "\nWhen describing what you can do, treat this live manifest "
+                "and the function schemas in this request as the source of truth. "
+                "Do not rely on old chat claims or generic model knowledge about "
+                "your capabilities. If a capability is absent, do not claim it is "
+                "currently available. "
+            )
+            + (
+                "\n\n# GOAL EXECUTION\n"
+                "For multi-step user goals, do not stop after the first successful "
+                "tool call. Continue until every requested part is completed, "
+                "blocked, needs user approval/clarification, or the bounded tool "
+                "budget is exhausted. Prefer dedicated/API tools first, then UI "
+                "Automation as a fallback. For named Spotify-track playback, prefer "
+                "spotify_search_tracks -> spotify_devices when needed -> "
+                "spotify_play_track when those tools are live; do not infer the "
+                "limitations of the legacy search_spotify browser fallback. "
+                "For UI Automation, inspect first and use only returned opaque refs. "
+                "Routine UI tools must never be used to bypass a sensitive UI tool. "
+                "After an action, if the result says verification is false and a "
+                "matching read/inspect tool exists, verify before claiming the final "
+                "state. If outcome is unknown, never retry automatically."
             )
         )
 
@@ -1864,8 +1947,11 @@ class AgentCore:
     def _model_tools(
         self,
     ) -> list[dict]:
+        live_capabilities = self._online_capabilities()
         return [
-            *self.registry.openai_schemas(),
+            *self.registry.openai_schemas(
+                live_capabilities
+            ),
             *CORE_TOOL_SCHEMAS,
             SOL_TOOL_SCHEMA,
         ]

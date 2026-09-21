@@ -45,8 +45,18 @@ class ToolRegistry:
     def get(self, name: str) -> tuple[ToolSpec, Callable[[dict], dict]] | None:
         return self._tools.get(name)
 
-    def openai_schemas(self) -> list[dict]:
-        return [spec.openai_schema() for spec, _ in self._tools.values()]
+    def openai_schemas(
+        self,
+        capabilities: set[str] | None = None,
+    ) -> list[dict]:
+        specs = self.specs()
+        if capabilities is not None:
+            specs = [
+                spec
+                for spec in specs
+                if spec.capability in capabilities
+            ]
+        return [spec.openai_schema() for spec in specs]
 
     def specs(self) -> list[ToolSpec]:
         return [spec for spec, _ in self._tools.values()]
@@ -299,6 +309,10 @@ def build_local_registry() -> ToolRegistry:
     register_system_tools(registry)
     from .file_tools import register_file_tools
     from .shell_tools import register_shell_tools
+    from .spotify_tools import register_spotify_tools
+    from .ui_tools import register_ui_tools
     register_file_tools(registry)
     register_shell_tools(registry)
+    register_spotify_tools(registry)
+    register_ui_tools(registry)
     return registry

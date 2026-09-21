@@ -1,4 +1,4 @@
-"""Device transport contract and a bounded, non-networked subprocess implementation."""
+﻿"""Device transport contract and a bounded, non-networked subprocess implementation."""
 import json
 import os
 from pathlib import Path
@@ -28,7 +28,8 @@ def worker_environment():
     # memory/sensor paths, model endpoints or parent authentication tokens.
     allowed = {"SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "COMSPEC", "PATH", "PATHEXT",
                "TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "PROGRAMDATA",
-               "PROGRAMFILES", "PROGRAMFILES(X86)", "EPIS_DEVICE_ID", "EPIS_DEVICE_NAME"}
+               "PROGRAMFILES", "PROGRAMFILES(X86)", "EPIS_DEVICE_ID", "EPIS_DEVICE_NAME",
+               "EPIS_SPOTIFY_CLIENT_ID", "EPIS_SPOTIFY_REDIRECT_URI"}
     return {key: value for key, value in os.environ.items() if key.upper() in allowed}
 
 
@@ -128,3 +129,4 @@ class StdioDeviceAgent:
             if stream:
                 stream.close()
         self._reader.join(timeout=1)
+
