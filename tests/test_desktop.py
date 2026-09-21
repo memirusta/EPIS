@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import result
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Layer-2" / "src"))
@@ -13,6 +14,32 @@ from agentic.permissions import PermissionEngine
 
 
 class DesktopTests(unittest.TestCase):
+    def test_catalog_matches_extended_app_name_to_start_app(self):
+        catalog = AppCatalog(
+            sources=(),
+            start_sources=(
+                lambda: [
+                    ("Brave", "Brave"),
+                    ("Windows Terminal", "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"),
+                    ],
+                ),
+            )
+        
+
+        result = catalog.discover(
+            {"query": "Brave Browser"}
+    )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["apps"][0]["app_name"],
+            "Brave",
+        )
+        self.assertNotIn(
+            "Brave",
+            result["apps"][0]["app_id"],
+        )
+    
     def test_catalog_never_returns_paths_and_launch_binds_id_and_name(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder, "sample.exe")
