@@ -40,6 +40,7 @@ class LiveCapabilityTests(unittest.TestCase):
         self.assertIn("# LIVE CAPABILITIES", system)
         self.assertIn("get_system_info", system)
         self.assertIn("system.info", system)
+        self.assertNotIn("wait_for_window", system)
 
     def test_multi_step_goal_continues_until_final_reply(self):
         core = build_core([

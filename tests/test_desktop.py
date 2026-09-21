@@ -14,6 +14,23 @@ from agentic.permissions import PermissionEngine
 
 
 class DesktopTests(unittest.TestCase):
+    def test_start_app_keeps_safe_launch_target_and_learns_process_name(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder, "app.exe")
+            path.write_bytes(b"synthetic")
+            catalog = AppCatalog(
+                sources=(lambda: [("Nebula", str(path))],),
+                start_sources=(lambda: [("Nebula", "Nebula")],),
+            )
+            entry = catalog.entries()[0]
+            self.assertEqual(entry.launch_kind, "start_app")
+            self.assertEqual(entry.path, "Nebula")
+            self.assertEqual(entry.process_name, "app.exe")
+            self.assertNotIn(
+                "path",
+                catalog.discover({"query": "Nebula"})["apps"][0],
+            )
+
     def test_catalog_matches_extended_app_name_to_start_app(self):
         catalog = AppCatalog(
             sources=(),
@@ -85,6 +102,25 @@ class DesktopTests(unittest.TestCase):
         backend.apply.return_value = {"ok": True}
         return WindowController(backend), backend
 
+    def test_launch_correlation_binds_display_app_to_new_process(self):
+        backend = Mock()
+        backend.enumerate.return_value = [{
+            "hwnd": 42,
+            "pid": 7,
+            "created": 123.0,
+            "process": "app.exe",
+            "class": "Nebula",
+            "minimized": False,
+        }]
+        backend.foreground_handle.return_value = 42
+        control = WindowController(backend)
+        result = control.correlate_launch(
+            {"rows": [], "foreground": 0},
+            timeout_seconds=1,
+        )
+        self.assertEqual(result["status"], "window_correlated")
+        self.assertEqual(result["window"]["app_name"], "app.exe")
+
     def test_windows_return_no_titles_handles_or_content(self):
         control, backend = self.windows()
         window = control.list_windows({"app_name": "sample"})["windows"][0]
@@ -148,6 +184,14 @@ class DesktopTests(unittest.TestCase):
 
     def test_desktop_routine_discovery_launch_and_window_actions_do_not_prompt(self):
         registry = build_local_registry()
+        visible = {
+            item["function"]["name"]
+            for item in registry.openai_schemas(
+                registry.capabilities("windows")
+            )
+        }
+        self.assertNotIn("wait_for_window", visible)
+        self.assertIn("windows.wait", registry.capabilities("windows"))
         for name in ("discover_apps", "launch_discovered_app", "list_windows", "close_window"):
             self.assertFalse(PermissionEngine().decide(registry.get(name)[0], {}).requires_confirmation)
         self.assertFalse(registry.dispatch("launch_discovered_app", {"app_id": "x", "app_name": "x", "command": "whoami"})["ok"])

@@ -707,6 +707,7 @@ def register_spotify_tools(registry):
             ),
             schema(),
             "spotify.auth_status",
+            effects=("spotify.authenticated",),
         ),
         controller.auth_status,
     )
@@ -735,6 +736,7 @@ def register_spotify_tools(registry):
             confirmation_notice=(
                 "Arama metni Spotify API'sine gönderilecek."
             ),
+            preconditions=("spotify.authenticated",),
         ),
         controller.search_tracks,
     )
@@ -747,6 +749,7 @@ def register_spotify_tools(registry):
             ),
             schema(),
             "spotify.devices",
+            preconditions=("spotify.authenticated",),
         ),
         controller.devices,
     )
@@ -759,6 +762,7 @@ def register_spotify_tools(registry):
             ),
             schema(),
             "spotify.current",
+            preconditions=("spotify.authenticated",),
         ),
         controller.current,
     )
@@ -778,6 +782,7 @@ def register_spotify_tools(registry):
                 ("track_ref",),
             ),
             "spotify.play",
+            preconditions=("spotify.authenticated",),
         ),
         controller.play_track,
     )
@@ -794,6 +799,7 @@ def register_spotify_tools(registry):
                 }
             ),
             "spotify.pause",
+            preconditions=("spotify.authenticated",),
         ),
         controller.pause,
     )

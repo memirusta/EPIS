@@ -714,16 +714,17 @@ def register_ui_tools(registry):
         ToolSpec(
             "ui_navigate_https",
             (
-                "Navigate the CURRENT foreground supported browser to an exact safe "
-                "HTTPS URL using its address bar. Use after wait_for_window + "
-                "focus_window for requests like 'open Nebula and go to YouTube'. "
-                "This is routine navigation only; it cannot submit forms or enter "
-                "passwords, and page load is not automatically verified."
+                "Navigate the intended foreground supported browser to an exact safe "
+                "HTTPS URL. Core resolves any known launch/focus prerequisite; Luna "
+                "does not need to reproduce window lifecycle steps. This cannot "
+                "submit forms or enter passwords, and page load is not automatically "
+                "verified."
             ),
             schema({
                 "url": {"type": "string", "maxLength": 2048},
             }, ("url",)),
             "browser.navigate_foreground",
+            preconditions=("foreground.latest_app",),
         ),
         controller.navigate_https,
     )

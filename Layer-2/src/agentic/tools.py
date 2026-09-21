@@ -21,6 +21,9 @@ class ToolSpec:
     confirmation_required: bool = False
     platforms: tuple[str, ...] = ("windows",)
     confirmation_notice: str = ""
+    preconditions: tuple[str, ...] = ()
+    effects: tuple[str, ...] = ()
+    model_visible: bool = True
 
     def openai_schema(self) -> dict:
         return {
@@ -49,7 +52,11 @@ class ToolRegistry:
         self,
         capabilities: set[str] | None = None,
     ) -> list[dict]:
-        specs = self.specs()
+        specs = [
+            spec
+            for spec in self.specs()
+            if spec.model_visible
+        ]
         if capabilities is not None:
             specs = [
                 spec

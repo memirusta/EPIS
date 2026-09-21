@@ -12,6 +12,7 @@ import uuid
 from typing import Any
 
 from .devices import DeviceRegistry
+from .execution import ExecutionEngine
 from .luna import LunaClient, ToolCall
 from .permissions import PermissionEngine
 from .tasks import TaskStore
@@ -189,6 +190,7 @@ class AgentCore:
         tasks: TaskStore | None = None,
         hot_memory=None,
         usage_repository=None,
+        execution: ExecutionEngine | None = None,
     ):
         self.luna = luna
         self.system_prompt = system_prompt
@@ -199,6 +201,7 @@ class AgentCore:
         self.local_agent = local_agent
         self.permissions = permissions or PermissionEngine()
         self.sol = sol or SolDelegator()
+        self.execution = execution or ExecutionEngine()
 
         self.hot_memory = hot_memory
         self.usage_repository = usage_repository
@@ -422,7 +425,10 @@ class AgentCore:
         capabilities = self._online_capabilities()
         tools = []
         for spec in self.registry.specs():
-            if spec.capability not in capabilities:
+            if (
+                not spec.model_visible
+                or spec.capability not in capabilities
+            ):
                 continue
             decision = self.permissions.decide(spec, {})
             tools.append({
@@ -575,27 +581,17 @@ class AgentCore:
                 "currently available. "
             )
             + (
-                "\n\n# GOAL EXECUTION\n"
-                "For multi-step user goals, do not stop after the first successful "
-                "tool call. Continue until every requested part is completed, "
-                "blocked, needs user approval/clarification, or the bounded tool "
-                "budget is exhausted. Prefer dedicated/API tools first, then UI "
-                "Automation as a fallback. For named Spotify-track playback, prefer "
-                "spotify_search_tracks -> spotify_devices when needed -> "
-                "spotify_play_track when those tools are live; do not infer the "
-                "limitations of the legacy search_spotify browser fallback. "
-                "For UI Automation, inspect first and use only returned opaque refs. "
-                "After launch_discovered_app returns launch_requested with an "
-                "unverified visible window, do not immediately assume failure and "
-                "do not call list_windows only once. If wait_for_window is live, "
-                "wait for the launched app, then focus the returned window before "
-                "using foreground UI tools. For a request to open a specific browser "
-                "and navigate to an HTTPS site, prefer wait_for_window -> focus_window "
-                "-> ui_navigate_https when those tools are live. "
-                "Routine UI tools must never be used to bypass a sensitive UI tool. "
-                "After an action, if the result says verification is false and a "
-                "matching read/inspect tool exists, verify before claiming the final "
-                "state. If outcome is unknown, never retry automatically."
+                "\n\n# EXECUTION CONTRACT\n"
+                "For multi-step user goals, choose semantic tools that express the "
+                "user's intent and continue until the goal is complete, blocked, "
+                "needs approval/clarification, or the bounded tool budget is exhausted. "
+                "Core owns supported technical prerequisites, device routing, "
+                "app/window correlation, focus recovery, permission enforcement and "
+                "runtime world state. Do not memorize or manually reproduce hidden OS "
+                "lifecycle recipes unless Core explicitly reports an unresolved "
+                "precondition. Treat core_recovery entries as machine observations, "
+                "not user-facing prose. Routine UI tools must never bypass sensitive "
+                "UI tools. If outcome is unknown, never retry automatically."
             )
         )
 
@@ -1452,10 +1448,41 @@ class AgentCore:
 
         return result
 
+    def _run_execution_recovery(
+        self,
+        tool_name: str,
+        arguments: dict,
+    ) -> dict:
+        """Run a fixed Core-owned prerequisite through the normal policy path."""
+        turn = self._dispatch(
+            ToolCall(
+                f"core-recovery-{uuid.uuid4().hex}",
+                tool_name,
+                arguments,
+            ),
+            confirmed=False,
+            allow_recovery=False,
+        )
+        if turn.confirmation_required:
+            return {
+                "ok": False,
+                "error": "execution_recovery_requires_confirmation",
+                "tool": tool_name,
+            }
+        if not turn.tool_results:
+            return {
+                "ok": False,
+                "error": "execution_recovery_returned_no_result",
+                "tool": tool_name,
+            }
+        return dict(turn.tool_results[-1])
+
     def _dispatch(
         self,
         call: ToolCall,
         confirmed: bool,
+        *,
+        allow_recovery: bool = True,
     ) -> AgentTurn:
         if call.name in {
             "get_devices",
@@ -1720,6 +1747,34 @@ class AgentCore:
                 ],
             )
 
+        recovery_summaries = []
+        if allow_recovery:
+            preparation = self.execution.prepare(
+                spec,
+                call.arguments,
+                device.device_id,
+                self._run_execution_recovery,
+            )
+            recovery_summaries = preparation.recoveries
+            if not preparation.ok:
+                self.tasks.finish(
+                    task_id,
+                    "failed",
+                )
+                result = dict(
+                    preparation.blocked_result
+                    or {
+                        "ok": False,
+                        "error": "execution_precondition_failed",
+                    }
+                )
+                if recovery_summaries:
+                    result["core_recovery"] = recovery_summaries
+                return AgentTurn(
+                    "",
+                    [result],
+                )
+
         if not self.tasks.claim(
             task_id
         ):
@@ -1770,6 +1825,17 @@ class AgentCore:
                 "outcome": "unknown",
                 "error": "Invalid device result",
             }
+
+        self.execution.observe(
+            spec,
+            call.arguments,
+            result,
+            device.device_id,
+        )
+
+        if recovery_summaries:
+            result = dict(result)
+            result["core_recovery"] = recovery_summaries
 
         state = (
             "unknown"
@@ -2006,6 +2072,7 @@ class AgentCore:
             return False
         self.transports.pop(device_id, None)
         current.close()
+        self.execution.world.clear_device(device_id)
         device = self.devices.get(device_id)
         if device is not None:
             device.online = False

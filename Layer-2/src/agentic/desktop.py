@@ -46,6 +46,7 @@ class AppEntry:
     path: str
     app_id: str
     launch_kind: str = "exe"
+    process_name: str = ""
 
 
 def app_entry(name, target):
@@ -80,7 +81,12 @@ def app_entry(name, target):
 
     identity = f"{path!s}|{file_stat.st_size}|{file_stat.st_mtime_ns}"
     app_id = hashlib.sha256(identity.encode()).hexdigest()[:24]
-    return AppEntry(str(name)[:100], str(path), app_id)
+    return AppEntry(
+        str(name)[:100],
+        str(path),
+        app_id,
+        process_name=path.name,
+    )
 
 
 def normalized_app_words(value: str) -> list[str]:
@@ -334,14 +340,44 @@ class AppCatalog:
                 if entry:
                     entries_by_name.setdefault(entry.name.casefold(), entry)
 
-        # Registry / classic EXE discovery fallback.
+        # Registry / classic EXE discovery fallback. When the same display name
+        # is already represented by a Windows Start App, keep the safer Start
+        # launch target but enrich it with the real executable/process name.
         for source in self.sources:
             for name, target in source():
                 entry = app_entry(name, target)
-                if entry:
-                    entries_by_name.setdefault(entry.name.casefold(), entry)
+                if not entry:
+                    continue
+                key = entry.name.casefold()
+                existing = entries_by_name.get(key)
+                if (
+                    existing is not None
+                    and existing.launch_kind == "start_app"
+                    and not existing.process_name
+                    and entry.process_name
+                ):
+                    entries_by_name[key] = AppEntry(
+                        name=existing.name,
+                        path=existing.path,
+                        app_id=existing.app_id,
+                        launch_kind=existing.launch_kind,
+                        process_name=entry.process_name,
+                    )
+                else:
+                    entries_by_name.setdefault(key, entry)
 
         return list(entries_by_name.values())
+
+    def resolve(self, arguments):
+        return next(
+            (
+                entry
+                for entry in self.entries()
+                if entry.app_id == arguments.get("app_id")
+                and entry.name == arguments.get("app_name")
+            ),
+            None,
+        )
 
     def discover(self, arguments):
         query = str(arguments.get("query") or "").strip()
@@ -395,16 +431,9 @@ class AppCatalog:
         }
 
     def launch(self, arguments):
-        entry = next(
-            (
-                entry
-                for entry in self.entries()
-                if entry.app_id == arguments["app_id"]
-            ),
-            None,
-        )
+        entry = self.resolve(arguments)
 
-        if not entry or entry.name != arguments["app_name"]:
+        if not entry:
             return {
                 "ok": False,
                 "error": (
@@ -442,6 +471,10 @@ class AppCatalog:
 
 
 class Win32Windows:
+    def foreground_handle(self) -> int:
+        import win32gui
+        return int(win32gui.GetForegroundWindow())
+
     def enumerate(self):
         import psutil
         import win32gui
@@ -524,6 +557,132 @@ class WindowController:
     def __init__(self, backend=None):
         self.backend = backend or Win32Windows()
         self.snapshot = {}
+        self.snapshot_sources = {}
+
+    @staticmethod
+    def _identity(row):
+        return (
+            row["hwnd"],
+            row["pid"],
+            row["created"],
+            row["process"],
+            row["class"],
+        )
+
+    def _visible_rows(self):
+        return [
+            row
+            for row in self.backend.enumerate()
+            if row["process"].lower()
+            not in {"explorer.exe", "dwm.exe", "winlogon.exe", "lockapp.exe"}
+        ]
+
+    def capture_launch_state(self):
+        rows = self._visible_rows()
+        try:
+            foreground = self.backend.foreground_handle()
+        except Exception:
+            foreground = None
+        return {
+            "rows": [dict(row) for row in rows],
+            "foreground": foreground,
+        }
+
+    def correlate_launch(
+        self,
+        before,
+        *,
+        process_name="",
+        timeout_seconds=8,
+    ):
+        before_rows = before.get("rows") or []
+        before_ids = {
+            self._identity(row)
+            for row in before_rows
+        }
+        before_foreground = before.get("foreground")
+        deadline = time.monotonic() + timeout_seconds
+        process_query = str(process_name or "").casefold()
+
+        while True:
+            current = self._visible_rows()
+            try:
+                foreground = self.backend.foreground_handle()
+            except Exception:
+                foreground = None
+
+            chosen = None
+            exact_process = [
+                row
+                for row in current
+                if process_query
+                and row["process"].casefold() == process_query
+            ]
+            if len(exact_process) == 1:
+                candidate = exact_process[0]
+                if (
+                    self._identity(candidate) not in before_ids
+                    or foreground == candidate["hwnd"]
+                ):
+                    chosen = candidate
+
+            new_rows = [
+                row
+                for row in current
+                if self._identity(row) not in before_ids
+            ]
+            if chosen is None and new_rows:
+                foreground_new = next(
+                    (
+                        row
+                        for row in new_rows
+                        if row["hwnd"] == foreground
+                    ),
+                    None,
+                )
+                if foreground_new is not None:
+                    chosen = foreground_new
+                elif len(new_rows) == 1:
+                    chosen = new_rows[0]
+
+            if chosen is None and process_query and foreground != before_foreground:
+                focused_match = next(
+                    (
+                        row
+                        for row in exact_process
+                        if row["hwnd"] == foreground
+                    ),
+                    None,
+                )
+                if focused_match is not None:
+                    chosen = focused_match
+
+            if chosen is not None:
+                token = uuid.uuid4().hex
+                self.snapshot[token] = (
+                    chosen,
+                    time.monotonic() + 120,
+                )
+                self.snapshot_sources[token] = "launch"
+                return {
+                    "ok": True,
+                    "status": "window_correlated",
+                    "window": {
+                        "window_id": token,
+                        "app_name": chosen["process"],
+                        "minimized": chosen["minimized"],
+                    },
+                    "selection_ttl_seconds": 120,
+                }
+
+            if time.monotonic() >= deadline:
+                return {
+                    "ok": True,
+                    "status": "window_not_correlated",
+                    "window": None,
+                }
+
+            time.sleep(0.2)
 
     def list_windows(self, arguments):
         query = arguments.get("app_name", "").casefold().strip()
@@ -538,6 +697,10 @@ class WindowController:
         self.snapshot = {
             uuid.uuid4().hex: (row, time.monotonic() + 120)
             for row in rows[:64]
+        }
+        self.snapshot_sources = {
+            token: "list"
+            for token in self.snapshot
         }
 
         return {
@@ -583,6 +746,10 @@ class WindowController:
 
     def act(self, arguments, action):
         saved = self.snapshot.get(arguments["window_id"])
+        source = self.snapshot_sources.get(
+            arguments["window_id"],
+            "list",
+        )
         if not saved or saved[1] < time.monotonic():
             return {
                 "ok": False,
@@ -598,7 +765,8 @@ class WindowController:
         # Names alone cannot disambiguate two documents/windows from the same app.
         # Enforce this here, not just in a model instruction.
         if (
-            sum(
+            source != "launch"
+            and sum(
                 row["process"].casefold() == expected["process"].casefold()
                 for row in current
             )
@@ -641,6 +809,38 @@ def register_desktop_tools(registry):
             "additionalProperties": False,
         }
 
+    def launch_with_correlation(arguments):
+        entry = catalog.resolve(arguments)
+        before = (
+            windows.capture_launch_state()
+            if entry is not None
+            else None
+        )
+        result = catalog.launch(arguments)
+        if (
+            not result.get("ok")
+            or result.get("status") != "launch_requested"
+            or before is None
+        ):
+            return result
+
+        correlation = windows.correlate_launch(
+            before,
+            process_name=entry.process_name,
+            timeout_seconds=8,
+        )
+        window = correlation.get("window")
+        result = dict(result)
+        result["window_correlation"] = correlation.get("status")
+        result["window"] = window
+        result["visible_window_verified"] = bool(window)
+        if window:
+            result["selection_ttl_seconds"] = correlation.get(
+                "selection_ttl_seconds",
+                120,
+            )
+        return result
+
     registry.register(
         ToolSpec(
             "discover_apps",
@@ -682,8 +882,9 @@ def register_desktop_tools(registry):
             "apps.launch",
             "yellow",
             True,
+            effects=("app.latest_window",),
         ),
-        catalog.launch,
+        launch_with_correlation,
     )
 
     registry.register(
@@ -724,6 +925,7 @@ def register_desktop_tools(registry):
                 },
             }, ("app_name",)),
             "windows.wait",
+            model_visible=False,
         ),
         windows.wait_for_window,
     )
@@ -748,6 +950,11 @@ def register_desktop_tools(registry):
                 f"windows.{action}",
                 "yellow" if action == "close" else "green",
                 action == "close",
+                effects=(
+                    ("window.foreground",)
+                    if action == "focus"
+                    else ()
+                ),
             ),
             lambda args, action=action: windows.act(args, action),
         )
