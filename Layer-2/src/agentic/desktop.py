@@ -657,6 +657,27 @@ class WindowController:
                 if focused_match is not None:
                     chosen = focused_match
 
+            # Windows Start Apps may not reveal their real process name in the
+            # discovery catalog. Launching an already-running app can therefore
+            # create no new row at all; Windows simply brings its existing window
+            # to the foreground. Bind that concrete foreground transition.
+            if (
+                chosen is None
+                and not process_query
+                and foreground
+                and foreground != before_foreground
+            ):
+                focused_row = next(
+                    (
+                        row
+                        for row in current
+                        if row["hwnd"] == foreground
+                    ),
+                    None,
+                )
+                if focused_row is not None:
+                    chosen = focused_row
+
             if chosen is not None:
                 token = uuid.uuid4().hex
                 self.snapshot[token] = (

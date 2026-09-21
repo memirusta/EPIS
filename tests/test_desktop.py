@@ -121,6 +121,32 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(result["status"], "window_correlated")
         self.assertEqual(result["window"]["app_name"], "app.exe")
 
+    def test_launch_correlation_binds_existing_start_app_brought_to_foreground(self):
+        backend = Mock()
+        existing = {
+            "hwnd": 42,
+            "pid": 7,
+            "created": 123.0,
+            "process": "ChatGPT.exe",
+            "class": "ChatGPT",
+            "minimized": False,
+        }
+        backend.enumerate.return_value = [existing]
+        backend.foreground_handle.return_value = 42
+
+        control = WindowController(backend)
+        result = control.correlate_launch(
+            {
+                "rows": [dict(existing)],
+                "foreground": 99,
+            },
+            process_name="",
+            timeout_seconds=1,
+        )
+
+        self.assertEqual(result["status"], "window_correlated")
+        self.assertEqual(result["window"]["app_name"], "ChatGPT.exe")
+
     def test_windows_return_no_titles_handles_or_content(self):
         control, backend = self.windows()
         window = control.list_windows({"app_name": "sample"})["windows"][0]
