@@ -10,7 +10,6 @@ import uuid
 
 # Discovery is not an arbitrary command/scripting interface.
 BLOCKED_EXECUTABLES = {
-    "cmd.exe", "powershell.exe", "pwsh.exe", "wt.exe", "windowsterminal.exe",
     "wscript.exe", "cscript.exe", "mshta.exe", "rundll32.exe", "regsvr32.exe",
     "reg.exe", "msiexec.exe", "schtasks.exe", "wmic.exe", "wsl.exe", "bash.exe",
     "python.exe", "pythonw.exe", "node.exe", "java.exe", "javaw.exe",
@@ -219,13 +218,13 @@ def register_desktop_tools(registry):
     device = {"device_id": {"type": "string"}}
     def schema(properties, required=()):
         return {"type": "object", "properties": {**properties, **device}, "required": list(required), "additionalProperties": False}
-    registry.register(ToolSpec("discover_apps", "FIRST STEP to open any app not in open_app, e.g. Nebula. Call this function immediately; Core pauses it to ask approval. Do not ask approval in chat. Returns exact app_id/app_name; no paths.",
+    registry.register(ToolSpec("discover_apps", "Discover installed apps by a model-chosen canonical search term. Use this for apps outside open_app and when the user describes an app indirectly (appearance, category, nickname, abbreviation or command name). Infer a likely canonical app name, search it, broaden once if needed, then use an exact returned app_id/app_name. No paths or shortcut arguments are returned.",
         schema({"query": {"type": "string", "maxLength": 100}}), "apps.discover", "yellow", True,
         confirmation_notice="Eşleşen uygulama adları model API'sine gönderilecek; dosya yolları gönderilmez."), catalog.discover)
-    registry.register(ToolSpec("launch_discovered_app", "Launch an exact discovered app ID/name after approval. No paths, arguments, shell or scripts accepted.",
+    registry.register(ToolSpec("launch_discovered_app", "Launch an exact discovered app ID/name. This launches only the stored executable with no arguments and never elevates. No paths, arguments, shell commands or scripts are accepted.",
         schema({"app_id": {"type": "string", "maxLength": 24}, "app_name": {"type": "string", "maxLength": 100}}, ("app_id", "app_name")),
         "apps.launch", "yellow", True), catalog.launch)
-    registry.register(ToolSpec("list_windows", "FIRST STEP to minimize/maximize/restore/focus/close a window. Call this function immediately; Core asks approval before collecting process names. Do not ask approval in chat. No titles/content.",
+    registry.register(ToolSpec("list_windows", "FIRST STEP to minimize/maximize/restore/focus/close a window. Returns opaque window IDs plus application names only; no titles or content.",
         schema({"app_name": {"type": "string", "maxLength": 100}}), "windows.list", "yellow", True,
         confirmation_notice="Eşleşen açık uygulama adları model API'sine gönderilecek; pencere başlıkları ve içerikleri okunmaz."), windows.list_windows)
     selection = schema({"window_id": {"type": "string", "maxLength": 32}, "app_name": {"type": "string", "maxLength": 100}}, ("window_id", "app_name"))

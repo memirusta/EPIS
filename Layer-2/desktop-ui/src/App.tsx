@@ -15,6 +15,14 @@ type Message = {
 
 type ConnectionState = "connecting" | "online" | "offline";
 
+type ApprovalRequest = {
+  id: string;
+  message: string;
+  tool?: string;
+  capability?: string;
+  risk?: string;
+};
+
 type ServerConfig = {
   url: string;
   token: string;
@@ -113,6 +121,27 @@ let messageId = 0;
 function nextMessageId() {
   messageId += 1;
   return messageId;
+}
+
+function asApprovalRequest(value: unknown): ApprovalRequest | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const item = value as Record<string, unknown>;
+
+  if (typeof item.id !== "string" || typeof item.message !== "string") {
+    return null;
+  }
+
+  return {
+    id: item.id,
+    message: item.message,
+    tool: typeof item.tool === "string" ? item.tool : undefined,
+    capability:
+      typeof item.capability === "string" ? item.capability : undefined,
+    risk: typeof item.risk === "string" ? item.risk : undefined,
+  };
 }
 
 function asObject(value: unknown): ToolResult | null {
@@ -279,16 +308,16 @@ function asDeviceSnapshots(value: unknown): DeviceSnapshot[] | null {
 function formatNumber(value: number | null | undefined): string {
   return typeof value === "number"
     ? new Intl.NumberFormat("tr-TR").format(value)
-    : "—";
+    : "â€”";
 }
 
 function formatLatency(value: number | null): string {
-  return typeof value === "number" ? `${(value / 1000).toFixed(1)}s` : "—";
+  return typeof value === "number" ? `${(value / 1000).toFixed(1)}s` : "â€”";
 }
 
 function formatCost(value: number | null, currency: string | null): string {
   if (value === null) {
-    return "—";
+    return "â€”";
   }
 
   return new Intl.NumberFormat("en-US", {
@@ -302,7 +331,7 @@ function formatCost(value: number | null, currency: string | null): string {
 function formatTimestamp(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime())
-    ? "—"
+    ? "â€”"
     : new Intl.DateTimeFormat("tr-TR", {
       hour: "2-digit",
       minute: "2-digit",
@@ -348,8 +377,8 @@ export default function App() {
     useState<Message[]>(loadStoredMessages);
   const [text, setText] = useState("");
   const [waiting, setWaiting] = useState(false);
-  const [confirmationPending, setConfirmationPending] =
-    useState(false);
+  const [approvalPending, setApprovalPending] =
+    useState<ApprovalRequest | null>(null);
   const [usage, setUsage] = useState<UsageSnapshot | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageError, setUsageError] = useState<string | null>(null);
@@ -440,21 +469,30 @@ export default function App() {
             const parsedResults = rawResults
               .map(asObject)
               .filter((item): item is ToolResult => item !== null);
+            const messageText = String(data.text ?? "").trim();
 
-            setMessages((current) => [
-              ...current,
-              {
-                id: nextMessageId(),
-                role: "assistant",
-                text: String(data.text ?? ""),
-                toolResults: parsedResults,
-              },
-            ]);
+            if (messageText || parsedResults.length > 0) {
+              setMessages((current) => [
+                ...current,
+                {
+                  id: nextMessageId(),
+                  role: "assistant",
+                  text: messageText,
+                  toolResults: parsedResults,
+                },
+              ]);
+            }
+
+            if (Boolean(data.confirmation_required)) {
+              const approval = asApprovalRequest(data.approval);
+              if (approval === null) {
+                setError("Onay isteği okunamadı.");
+              } else {
+                setApprovalPending(approval);
+              }
+            }
 
             setWaiting(false);
-            setConfirmationPending(
-              Boolean(data.confirmation_required),
-            );
             return;
           }
 
@@ -462,7 +500,7 @@ export default function App() {
             const snapshot = asUsageSnapshot(data.data);
 
             if (snapshot === null) {
-              setUsageError("Usage verisi okunamadı.");
+              setUsageError("Usage verisi okunamadÄ±.");
             } else {
               setUsage(snapshot);
               setUsageError(null);
@@ -475,7 +513,7 @@ export default function App() {
           if (data.type === "devices.snapshot") {
             const snapshot = asDeviceSnapshots(data.devices);
             if (snapshot === null) {
-              setDevicesError("Cihaz verisi okunamadı.");
+              setDevicesError("Cihaz verisi okunamadÄ±.");
             } else {
               setDevices(snapshot);
               setDevicesError(null);
@@ -487,7 +525,7 @@ export default function App() {
           if (data.type === "conversation.reset") {
             setMessages([]);
             setWaiting(false);
-            setConfirmationPending(false);
+            setApprovalPending(null);
             setError(null);
             return;
           }
@@ -583,7 +621,7 @@ export default function App() {
       behavior: "smooth",
       block: "end",
     });
-  }, [messages, waiting, confirmationPending]);
+  }, [messages, waiting, approvalPending]);
 
   function sendPacket(packet: object) {
     const ws = socketRef.current;
@@ -605,8 +643,7 @@ export default function App() {
 
     if (
       !value ||
-      waiting ||
-      confirmationPending
+      waiting
     ) {
       return;
     }
@@ -650,14 +687,16 @@ export default function App() {
   function approve() {
     if (
       waiting ||
+      !approvalPending ||
       !sendPacket({
         type: "approval.confirm",
+        approval_id: approvalPending.id,
       })
     ) {
       return;
     }
 
-    setConfirmationPending(false);
+    setApprovalPending(null);
     setWaiting(true);
     setError(null);
   }
@@ -665,14 +704,16 @@ export default function App() {
   function reject() {
     if (
       waiting ||
+      !approvalPending ||
       !sendPacket({
         type: "approval.reject",
+        approval_id: approvalPending.id,
       })
     ) {
       return;
     }
 
-    setConfirmationPending(false);
+    setApprovalPending(null);
     setWaiting(true);
     setError(null);
   }
@@ -691,7 +732,7 @@ export default function App() {
     }
 
     setWaiting(true);
-    setConfirmationPending(false);
+    setApprovalPending(null);
     setError(null);
   }
 
@@ -864,22 +905,16 @@ export default function App() {
                   </article>
                 )}
 
-                {confirmationPending && (
+                {approvalPending && (
                   <section className="permission-card">
                     <div className="permission-icon">
                       !
                     </div>
 
                     <div className="permission-copy">
-                      <strong>
-                        {"\u0130zin gerekiyor"}
-                      </strong>
+                      <strong>Onay gerekiyor</strong>
 
-                      <span>
-                        {
-                          "EPIS bu i\u015fleme devam etmek i\u00e7in onay\u0131n\u0131 bekliyor."
-                        }
-                      </span>
+                      <span>{approvalPending.message}</span>
                     </div>
 
                     <div className="permission-actions">
@@ -887,14 +922,14 @@ export default function App() {
                         className="secondary"
                         onClick={reject}
                       >
-                        Reddet
+                        Hayır
                       </button>
 
                       <button
                         className="primary"
                         onClick={approve}
                       >
-                        {"\u0130zin ver"}
+                        Evet
                       </button>
                     </div>
                   </section>
@@ -946,16 +981,11 @@ export default function App() {
 
               <textarea
                 value={text}
-                disabled={
-                  connection !== "online" ||
-                  confirmationPending
-                }
+                disabled={connection !== "online" || waiting}
                 placeholder={
                   connection !== "online"
                     ? "Server ba\u011flant\u0131s\u0131 bekleniyor..."
-                    : confirmationPending
-                      ? "\u00d6nce izin iste\u011fini yan\u0131tla"
-                      : "EPIS'e bir \u015fey s\u00f6yle..."
+                    : "EPIS'e bir \u015fey s\u00f6yle..."
                 }
                 onChange={(event) =>
                   setText(event.target.value)
@@ -969,7 +999,6 @@ export default function App() {
                 disabled={
                   !text.trim() ||
                   waiting ||
-                  confirmationPending ||
                   connection !== "online"
                 }
               >
@@ -981,14 +1010,14 @@ export default function App() {
       ) : page === "usage" ? (
         <main className="panel-page">
           <section className="panel usage-panel">
-            <div className="panel-kicker">USAGE · TODAY</div>
+            <div className="panel-kicker">USAGE Â· TODAY</div>
             <h1>API Usage</h1>
             <p>
               Toplamlar OpenAI Organization Usage ve Costs API'lerinden gelir.
-              Prompt ve yanıt metni kaydedilmez.
+              Prompt ve yanÄ±t metni kaydedilmez.
             </p>
 
-            {usageLoading && <div className="usage-state">Yükleniyor...</div>}
+            {usageLoading && <div className="usage-state">YÃ¼kleniyor...</div>}
 
             {usageError && <div className="usage-state error-state">{usageError}</div>}
 
@@ -999,7 +1028,7 @@ export default function App() {
             {!usageLoading && !usageError && usage && usage.totals.requests === 0 &&
               (usage.tool_usage?.totals.calls ?? 0) === 0 && (
               <div className="usage-state">
-                Bu zaman aralığında kaydedilmiş model veya araç çağrısı yok.
+                Bu zaman aralÄ±ÄŸÄ±nda kaydedilmiÅŸ model veya araÃ§ Ã§aÄŸrÄ±sÄ± yok.
               </div>
             )}
 
@@ -1023,7 +1052,7 @@ export default function App() {
                     <span>Cache hit</span>
                     <strong>
                       {usage.totals.cache_hit_percent === null
-                        ? "—"
+                        ? "â€”"
                         : `%${usage.totals.cache_hit_percent}`}
                     </strong>
                   </div>
@@ -1059,14 +1088,14 @@ export default function App() {
                     <h2>Last 24h token graph</h2>
                     <span>{usage.hourly.length} hourly buckets</span>
                   </div>
-                  <div className="usage-chart" aria-label="Son 24 saatte kullanılan token miktarı">
+                  <div className="usage-chart" aria-label="Son 24 saatte kullanÄ±lan token miktarÄ±">
                     {usage.hourly.length > 0 ? (
                       <div className="usage-bars">
                         {usage.hourly.map((hour) => (
                           <div
                             className="usage-bar-slot"
                             key={hour.start_time}
-                            title={`${formatTimestamp(hour.start_time)} · ${formatNumber(hour.total_tokens)} tokens`}
+                            title={`${formatTimestamp(hour.start_time)} Â· ${formatNumber(hour.total_tokens)} tokens`}
                           >
                             <div
                               className="usage-bar"
@@ -1076,7 +1105,7 @@ export default function App() {
                         ))}
                       </div>
                     ) : (
-                      <span className="usage-chart-empty">Henüz saatlik OpenAI verisi yok.</span>
+                      <span className="usage-chart-empty">HenÃ¼z saatlik OpenAI verisi yok.</span>
                     )}
                   </div>
                 </section>
@@ -1084,7 +1113,7 @@ export default function App() {
                 <section className="usage-section">
                   <div className="usage-section-heading">
                     <h2>Recent calls</h2>
-                    <span>Son {usage.recent_calls.length} çağrı</span>
+                    <span>Son {usage.recent_calls.length} Ã§aÄŸrÄ±</span>
                   </div>
                   <div className="usage-call-list">
                     {usage.recent_calls.map((call) => (
@@ -1104,7 +1133,7 @@ export default function App() {
                     <div className="usage-section-heading">
                       <h2>Integrations & local tools</h2>
                       <span>
-                        {formatNumber(usage.tool_usage.totals.calls)} çağrı · {formatNumber(usage.tool_usage.totals.api_requests)} API isteği
+                        {formatNumber(usage.tool_usage.totals.calls)} Ã§aÄŸrÄ± Â· {formatNumber(usage.tool_usage.totals.api_requests)} API isteÄŸi
                       </span>
                     </div>
                     <div className="usage-integration-list">
@@ -1136,17 +1165,17 @@ export default function App() {
       ) : page === "devices" ? (
         <main className="panel-page">
           <section className="panel">
-            <div className="panel-kicker">DEVICES · LIVE</div>
+            <div className="panel-kicker">DEVICES Â· LIVE</div>
             <h1>Devices</h1>
             <p>
-              EPIS'e bağlı cihazlar ve izinli yetenekleri. Hassas cihaz durumu yerelde kalır.
+              EPIS'e baÄŸlÄ± cihazlar ve izinli yetenekleri. Hassas cihaz durumu yerelde kalÄ±r.
             </p>
 
-            {devicesLoading && <div className="usage-state">Yükleniyor...</div>}
+            {devicesLoading && <div className="usage-state">YÃ¼kleniyor...</div>}
             {devicesError && <div className="usage-state error-state">{devicesError}</div>}
             {!devicesLoading && !devicesError && devices.length === 0 && (
               <div className="usage-state">
-                Bağlı cihaz yok. Desktop uygulamasını yeniden başlattığında Windows ajanı otomatik bağlanır.
+                BaÄŸlÄ± cihaz yok. Desktop uygulamasÄ±nÄ± yeniden baÅŸlattÄ±ÄŸÄ±nda Windows ajanÄ± otomatik baÄŸlanÄ±r.
               </div>
             )}
             {!devicesLoading && !devicesError && devices.length > 0 && (
@@ -1156,7 +1185,7 @@ export default function App() {
                     <div className="device-card-heading">
                       <div>
                         <strong>{device.display_name}</strong>
-                        <span>{device.platform} · {device.device_id}</span>
+                        <span>{device.platform} Â· {device.device_id}</span>
                       </div>
                       <span className={`device-status ${device.online ? "online" : "offline"}`}>
                         {device.online ? "Online" : "Offline"}

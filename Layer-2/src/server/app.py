@@ -159,6 +159,9 @@ def turn_payload(turn: Any) -> dict[str, Any]:
         "confirmation_required": bool(
             getattr(turn, "confirmation_required", False)
         ),
+        "approval": jsonable(
+            getattr(turn, "approval", None)
+        ),
         "tool_results": jsonable(
             getattr(turn, "tool_results", [])
         ),
@@ -322,9 +325,13 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
             if message_type == "approval.confirm":
                 core = get_core()
+                approval_id = message.get("approval_id")
 
                 try:
-                    turn = await run_core_call(core.confirm_pending)
+                    turn = await run_core_call(
+                        core.confirm_pending,
+                        approval_id,
+                    )
                 except Exception as exc:
                     await websocket.send_json(
                         {
@@ -341,9 +348,13 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
             if message_type == "approval.reject":
                 core = get_core()
+                approval_id = message.get("approval_id")
 
                 try:
-                    turn = await run_core_call(core.reject_pending)
+                    turn = await run_core_call(
+                        core.reject_pending,
+                        approval_id,
+                    )
                 except Exception as exc:
                     await websocket.send_json(
                         {

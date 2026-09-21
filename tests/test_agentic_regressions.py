@@ -98,14 +98,14 @@ class RegressionTests(unittest.TestCase):
         self.assertFalse(PermissionEngine().decide(ToolSpec("bad", "", {}, "bad", "unknown"), {}).allowed)
 
     def test_red_requires_confirmation(self):
-        core = build_core([LunaReply(tool_calls=[ToolCall("red", "get_system_info", {})]), LunaReply(text="Done")], "red")
+        core = build_core([LunaReply(tool_calls=[ToolCall("red", "get_system_info", {})]), LunaReply(text="Bu işlem onay istiyor."), LunaReply(text="Done")], "red")
         self.assertTrue(core.handle("test").confirmation_required)
         self.assertEqual(core.history, [])
         self.assertTrue(core.confirm_pending().tool_results[0]["ok"])
 
     def test_multi_tool_confirmation_each_approved_once(self):
         calls = [ToolCall("a", "get_system_info", {}), ToolCall("b", "get_system_info", {})]
-        core = build_core([LunaReply(tool_calls=calls), LunaReply(text="Done")], "yellow")
+        core = build_core([LunaReply(tool_calls=calls), LunaReply(text="İlk işlem onay istiyor."), LunaReply(text="İkinci işlem de onay istiyor."), LunaReply(text="Done")], "yellow")
         execute = Mock(wraps=core.local_agent.execute)
         core.local_agent.execute = execute
         self.assertTrue(core.handle("test").confirmation_required)
@@ -117,19 +117,32 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(execute.call_count, 2)
         assert_protocol(self, core.history)
 
-    def test_rejection_cancels_batch_and_new_request_cannot_approve_old_action(self):
-        calls = [ToolCall("a", "get_system_info", {}), ToolCall("b", "get_system_info", {})]
-        core = build_core([LunaReply(tool_calls=calls), LunaReply(text="Hello")], "yellow")
-        execute = Mock()
+    def test_pending_approval_survives_unrelated_chat_until_user_decides(self):
+        calls = [ToolCall("a", "get_system_info", {})]
+        core = build_core([
+            LunaReply(tool_calls=calls),
+            LunaReply(text="Bu işlem onay istiyor."),
+            LunaReply(text="Bu arada normal sohbete devam edebiliriz."),
+            LunaReply(text="Tamamlandı."),
+        ], "yellow")
+        execute = Mock(return_value={"ok": True})
         core.local_agent.execute = execute
-        core.handle("test")
-        core.handle("new request")
-        core.confirm_pending()
+
+        pending = core.handle("riskli işi yap")
+        approval_id = pending.approval["id"]
+        self.assertTrue(pending.confirmation_required)
+
+        chat = core.handle("bu arada başka bir şey sorayım")
+        self.assertEqual(chat.message, "Bu arada normal sohbete devam edebiliriz.")
+        self.assertIsNotNone(core.pending)
         execute.assert_not_called()
-        assert_protocol(self, core.history)
+
+        final = core.confirm_pending(approval_id)
+        self.assertEqual(final.message, "Tamamlandı.")
+        execute.assert_called_once()
 
     def test_confirmation_rechecks_device_availability(self):
-        core = build_core([LunaReply(tool_calls=[ToolCall("a", "get_system_info", {})]), LunaReply(text="Offline")], "yellow")
+        core = build_core([LunaReply(tool_calls=[ToolCall("a", "get_system_info", {})]), LunaReply(text="Bu işlem onay istiyor."), LunaReply(text="Offline")], "yellow")
         core.handle("test")
         core.local_agent.device.online = False
         self.assertFalse(core.confirm_pending().tool_results[0]["ok"])
@@ -139,6 +152,7 @@ class RegressionTests(unittest.TestCase):
         core = build_core([
             LunaReply(tool_calls=[ToolCall("s1", "delegate_to_sol", {"task": "Analyze", "reason": "analysis"})]),
             LunaReply(tool_calls=[ToolCall("a", "get_system_info", {})]),
+            LunaReply(text="Bu işlem onay istiyor."),
             LunaReply(tool_calls=[ToolCall("s2", "delegate_to_sol", {"task": "Again", "reason": "analysis"})]),
             LunaReply(text="Done"),
         ], "yellow", sol)

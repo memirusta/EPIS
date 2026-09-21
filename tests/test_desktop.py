@@ -37,9 +37,13 @@ class DesktopTests(unittest.TestCase):
                 self.assertFalse(catalog.launch(app)["ok"])
                 launch.assert_not_called()
 
-    def test_catalog_rejects_shell_paths_arguments_and_non_executables(self):
+    def test_catalog_allows_argument_free_interactive_shells_but_blocks_runtimes(self):
         with tempfile.TemporaryDirectory() as folder:
-            for name in ("cmd.exe", "powershell.exe", "python.exe", "file.bat", "file.lnk"):
+            for name in ("cmd.exe", "powershell.exe", "pwsh.exe", "wt.exe"):
+                path = Path(folder, name)
+                path.write_bytes(b"test")
+                self.assertIsNotNone(app_entry(name, str(path)))
+            for name in ("python.exe", "node.exe", "wscript.exe", "file.bat", "file.lnk"):
                 path = Path(folder, name)
                 path.write_bytes(b"test")
                 self.assertIsNone(app_entry("bad", str(path)))
@@ -99,19 +103,13 @@ class DesktopTests(unittest.TestCase):
              patch("win32gui.GetForegroundWindow", return_value=99):
             self.assertFalse(Win32Windows().apply({"hwnd": 42}, "focus")["ok"])
 
-    def test_desktop_tools_have_sensitive_inventory_and_launch_gates(self):
+    def test_desktop_routine_discovery_launch_and_window_actions_do_not_prompt(self):
         registry = build_local_registry()
         for name in ("discover_apps", "launch_discovered_app", "list_windows", "close_window"):
-            self.assertTrue(PermissionEngine().decide(registry.get(name)[0], {}).requires_confirmation)
+            self.assertFalse(PermissionEngine().decide(registry.get(name)[0], {}).requires_confirmation)
         self.assertFalse(registry.dispatch("launch_discovered_app", {"app_id": "x", "app_name": "x", "command": "whoami"})["ok"])
-        worker = DeviceWorker()
-        import time
-        for capability in ("apps.discover", "windows.list"):
-            result = worker.handle({"version": 1, "operation": "execute", "id": "unauthorized", "device_id": worker.local.device.device_id,
-                                    "capability": capability, "arguments": {}, "confirmed": False, "deadline": time.time()+10})
-            self.assertFalse(result["ok"])
 
-    def test_core_discovery_then_launch_requires_two_separate_approvals(self):
+    def test_core_discovery_then_launch_runs_without_approval(self):
         from agentic.core import AgentCore
         from agentic.devices import DeviceRegistry, LocalDeviceAgent
         from agentic.luna import LunaReply, ToolCall
@@ -130,17 +128,10 @@ class DesktopTests(unittest.TestCase):
             ])
             core = AgentCore(luna, "EPIS", FakeContext(), FakeMemory(), registry, devices, local)
             try:
-                pending = core.handle("Synthetic app aç")
-                self.assertTrue(pending.confirmation_required)
-                self.assertIn("model API'sine gönderilecek", pending.message)
-                discover.assert_not_called()
-                launch.assert_not_called()
-                self.assertTrue(core.confirm_pending().confirmation_required)
-                discover.assert_called_once()
-                launch.assert_not_called()
-                final = core.confirm_pending()
+                final = core.handle("Synthetic app aç")
                 self.assertFalse(final.confirmation_required)
                 self.assertEqual(final.message, "Başlatma isteğini gönderdim.")
+                discover.assert_called_once()
                 launch.assert_called_once_with(selection)
             finally:
                 core.close()

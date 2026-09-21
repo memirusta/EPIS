@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from typing import Any
 
 from .devices import DeviceRegistry
@@ -36,6 +37,8 @@ class PendingAction:
     results: list[dict] = field(default_factory=list)
     model_steps: int = 0
     sol_delegations: int = 0
+    approval_id: str = ""
+    approval_message: str = ""
     expires_at: float = field(
         default_factory=lambda: time.monotonic() + 120
     )
@@ -46,6 +49,7 @@ class AgentTurn:
     message: str
     tool_results: list[dict]
     confirmation_required: bool = False
+    approval: dict[str, Any] | None = None
 
 
 class SolDelegator:
@@ -309,16 +313,101 @@ class AgentCore:
 
         return cleaned
 
+    @staticmethod
+    def _approval_safe_arguments(arguments: dict) -> dict:
+        """Bound approval-copy context without echoing file/message bodies."""
+        safe: dict[str, Any] = {}
+        hidden_keys = {
+            "content", "body", "message", "text", "token",
+            "password", "secret", "api_key", "authorization",
+        }
+
+        for key, value in (arguments or {}).items():
+            if key == "device_id":
+                continue
+            if key.casefold() in hidden_keys:
+                length = len(value) if isinstance(value, str) else None
+                safe[key] = (
+                    f"<content omitted; {length} chars>"
+                    if length is not None
+                    else "<content omitted>"
+                )
+                continue
+            if isinstance(value, str) and len(value) > 500:
+                safe[key] = value[:500] + "…"
+            else:
+                safe[key] = value
+
+        return safe
+
+    def _approval_message(
+        self,
+        approval: dict,
+        user_message: str,
+    ) -> str:
+        """Ask Luna for approval-card copy; policy remains deterministic."""
+        payload = {
+            "requested_by_user": user_message,
+            "tool": approval.get("tool"),
+            "capability": approval.get("capability"),
+            "risk": approval.get("risk"),
+            "target": approval.get("target"),
+            "arguments": self._approval_safe_arguments(
+                approval.get("arguments") or {}
+            ),
+            "policy_reason": approval.get("reason"),
+            "safety_note": approval.get("notice"),
+        }
+
+        try:
+            reply = self.luna.complete(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Sen EPIS'in Luna sesisin. Aşağıdaki bekleyen işlem "
+                            "için onay kartında gösterilecek 1-2 kısa, doğal Türkçe "
+                            "cümle yaz. Neyi yapacağını ve neden kullanıcı onayı "
+                            "gerektiğini somut söyle. Evet/Hayır, buton, JSON, başlık "
+                            "veya madde işareti yazma. İşlem yapılmış gibi konuşma. "
+                            "Verilmeyen ayrıntıyı uydurma. Teknik policy metnini "
+                            "kelimesi kelimesine tekrar etme; EPIS'in doğal sesiyle yaz."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            payload,
+                            ensure_ascii=False,
+                        ),
+                    },
+                ],
+                [],
+            )
+            text = (reply.text or "").strip()
+            if text:
+                return text
+        except Exception as exc:
+            self._log(
+                "approval_copy_failed",
+                error=type(exc).__name__,
+            )
+
+        # Fail-safe only when Luna is unavailable. The normal UI copy is model-owned.
+        return (
+            str(approval.get("notice") or "").strip()
+            or "Bu işlem devam etmeden önce onayını gerektiriyor."
+        )
+
     def handle(
         self,
         user_message: str,
     ) -> AgentTurn:
-        if self.pending:
-            # A new request must never inherit approval
-            # for an older action.
-            self.reject_pending()
-
-        self._call_tasks = {}
+        # A pending approval is independent from ordinary conversation.
+        # The user may keep chatting while the approval card remains visible.
+        # Keep the original task receipt mapping alive until that approval resolves.
+        if self.pending is None:
+            self._call_tasks = {}
 
         self._refresh_hot_history()
 
@@ -395,12 +484,18 @@ class AgentCore:
                 "KullanÄ±cÄ± desteklenen bir iÅŸlemi istediyse uygun tool "
                 "Ã§aÄŸrÄ±sÄ±nÄ± Ã¶ner. "
 
-                "Onay gereken araÃ§ iÃ§in ayrÄ±ca sohbetle 'onaylÄ±yor musun' "
-                "diye sorup turu bitirme: tool Ã§aÄŸrÄ±sÄ±nÄ± Ã¼ret; Core iÅŸlemi "
-                "DURDURUP kullanÄ±cÄ±dan evet/hayÄ±r alÄ±r. "
+                "Onay gereken bir araÃ§ iÃ§in tool Ã§aÄŸrÄ±sÄ±nÄ± normal ÅŸekilde Ã¼ret; "
+                "onay kararÄ±nÄ± model verme. Core iÅŸlemi durdurur, Luna'dan ayrÄ± "
+                "bir doÄŸal onay aÃ§Ä±klamasÄ± Ã¼rettirir ve UI Evet/HayÄ±r kartÄ± gÃ¶sterir. "
+                "Onay gelmeden iÅŸlemi yapÄ±lmÄ±ÅŸ sayma. "
 
-                "Bu, izni atlamak deÄŸildir; onay UI'si yalnÄ±zca Core'un "
-                "sorumluluÄŸudur. "
+                "Uygulama açma isteklerinde kullanıcı uygulamayı takma ad, renk, "
+                "kategori, kısaltma veya komut adıyla tarif edebilir. Bunu semantik "
+                "olarak muhtemel kanonik uygulama adına çevirip discover_apps ile ara; "
+                "sonuç yoksa bir kez daha genelleştirerek ara. Yalnızca gerçekten "
+                "dönen app_id/app_name çiftini launch_discovered_app ile aç; yol veya "
+                "uygulama kimliği uydurma. Komut istemcileri de uygulama olarak açılabilir, "
+                "ama bu onların içinde komut çalıştırma izni vermez. "
 
                 "AraÃ§ argÃ¼manlarÄ± belirsizse aÃ§Ä±klayÄ±cÄ± soru sor. "
                 "Desteklenmeyen iÅŸlemi desteklenmiÅŸ sayma."
@@ -411,6 +506,15 @@ class AgentCore:
             system += (
                 "\n\n# ANLIK BAGLAM\n"
                 + context
+            )
+
+        if self.pending is not None:
+            system += (
+                "\n\n# BEKLEYEN ONAY\n"
+                "UI'da ayrı bir işlem onay bekliyor. Kullanıcı bu sırada "
+                "normal sohbet etmeye devam edebilir. Yeni mesajı eski işlemin "
+                "onayı veya reddi sayma; eski işlemi yapılmış da sayma. "
+                "Evet/Hayır butonları Core tarafından ayrı yönetilir."
             )
 
         messages = [
@@ -594,12 +698,38 @@ class AgentCore:
 
         return root
 
+    def _supersede_pending(self) -> None:
+        """Cancel one older pending action when a newer approval replaces it."""
+        if self.pending is None:
+            return
+
+        pending, self.pending = self.pending, None
+        for call in [pending.tool_call, *pending.remaining_calls]:
+            task_id = self._call_tasks.get(call.call_id)
+            if task_id:
+                self.tasks.finish(task_id, "cancelled")
+
+        self._log(
+            "pending_approval_superseded",
+            tool=pending.tool_call.name,
+        )
+
     def confirm_pending(
         self,
+        approval_id: str | None = None,
     ) -> AgentTurn:
         if not self.pending:
             return AgentTurn(
                 "Onay bekleyen bir iÅŸlem yok.",
+                [],
+            )
+
+        if (
+            approval_id is not None
+            and approval_id != self.pending.approval_id
+        ):
+            return AgentTurn(
+                "Bu onay isteği artık geçerli değil.",
                 [],
             )
 
@@ -669,10 +799,20 @@ class AgentCore:
 
     def reject_pending(
         self,
+        approval_id: str | None = None,
     ) -> AgentTurn:
         if not self.pending:
             return AgentTurn(
                 "Onay bekleyen bir iÅŸlem yok.",
+                [],
+            )
+
+        if (
+            approval_id is not None
+            and approval_id != self.pending.approval_id
+        ):
+            return AgentTurn(
+                "Bu onay isteği artık geçerli değil.",
                 [],
             )
 
@@ -964,6 +1104,16 @@ class AgentCore:
                 if (
                     turn.confirmation_required
                 ):
+                    approval = dict(turn.approval or {})
+                    approval_id = uuid.uuid4().hex
+                    approval_message = self._approval_message(
+                        approval,
+                        user_message,
+                    )
+
+                    if self.pending is not None:
+                        self._supersede_pending()
+
                     self.pending = (
                         PendingAction(
                             deepcopy(call),
@@ -978,10 +1128,23 @@ class AgentCore:
                         )
                     )
 
+                    approval_payload = {
+                        "id": approval_id,
+                        "message": approval_message,
+                        "tool": approval.get("tool", call.name),
+                        "capability": approval.get("capability"),
+                        "risk": approval.get("risk"),
+                    }
+                    # Store UI identity alongside the pending action without
+                    # exposing it to device execution arguments.
+                    self.pending.approval_id = approval_id
+                    self.pending.approval_message = approval_message
+
                     return AgentTurn(
-                        turn.message,
+                        "",
                         results,
                         True,
+                        approval_payload,
                     )
 
                 for result in (
@@ -1382,58 +1545,35 @@ class AgentCore:
             and not confirmed
             and not session_read_granted
         ):
-            if session_read_root:
-                target = (
-                    device.display_name
-                    if device is not None
-                    else target_device
-                )
-
-                return AgentTurn(
-                    (
-                        f"{target}: "
-                        f"{session_read_root} altÄ±nda "
-                        "bu EPIS oturumu boyunca "
-                        "salt-okuma izni verilsin mi? "
-                        "KlasÃ¶r listeleme, dosya bilgisi "
-                        "ve metin dosyasÄ± okuma bu izne dahil. "
-                        "Okunan veri model API'sine gÃ¶nderilebilir. "
-                        "Yazma, kopyalama, taÅŸÄ±ma ve shell "
-                        "bu izne dahil deÄŸildir. "
-                        "(evet/hayÄ±r)"
-                    ),
-                    [],
-                    True,
-                )
-
-            detail = json.dumps(
-                call.arguments,
-                ensure_ascii=False,
-            )
-
             target = (
                 device.display_name
                 if device is not None
                 else target_device
             )
+            reason = decision.reason
+            notice = spec.confirmation_notice
 
-            notice = (
-                f" {spec.confirmation_notice}"
-                if spec.confirmation_notice
-                else ""
-            )
+            if session_read_root:
+                reason = "session read access requires confirmation"
+                notice = (
+                    "Bu klasör altında salt-okuma erişimi verilecek; "
+                    "okunan veriler model API'sine gönderilebilir. "
+                    "Yazma, kopyalama, taşıma ve shell dahil değildir."
+                )
 
             return AgentTurn(
-                (
-                    f"{target}: "
-                    f"{call.name} "
-                    f"{detail}."
-                    f"{notice} "
-                    "OnaylÄ±yor musun? "
-                    "(evet/hayÄ±r)"
-                ),
+                "",
                 [],
                 True,
+                {
+                    "tool": call.name,
+                    "capability": spec.capability,
+                    "risk": spec.risk_class,
+                    "target": target,
+                    "arguments": deepcopy(call.arguments),
+                    "reason": reason,
+                    "notice": notice,
+                },
             )
 
         if not device:

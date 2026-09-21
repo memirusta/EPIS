@@ -55,11 +55,12 @@ class FakeSol:
 
 def build_core(replies, risk=RiskClass.GREEN.value, sol=None):
     registry = ToolRegistry()
+    capability = "system.info" if risk == RiskClass.GREEN.value else "test.confirm"
     registry.register(
         ToolSpec(
             "get_system_info", "Read test status.",
             {"type": "object", "properties": {}, "additionalProperties": False},
-            "system.info", risk, risk != RiskClass.GREEN.value,
+            capability, risk, risk != RiskClass.GREEN.value,
         ),
         lambda args: {"ok": True, "hostname": "legion-test"},
     )
@@ -67,6 +68,7 @@ def build_core(replies, risk=RiskClass.GREEN.value, sol=None):
     local = LocalDeviceAgent(
         devices,
         lambda capability, args: registry.dispatch("get_system_info", args),
+        {capability},
     )
     return AgentCore(
         luna=FakeLuna(replies), system_prompt="EPIS identity", context_builder=FakeContext(),
@@ -97,12 +99,17 @@ class AgentCoreTests(unittest.TestCase):
     def test_yellow_tool_needs_explicit_confirmation(self):
         core = build_core([
             LunaReply(tool_calls=[ToolCall("call-2", "get_system_info", {})]),
+            LunaReply(text="Bunu yapmadan önce onayını almam gerekiyor."),
             LunaReply(text="Onayla bilgisayar durumunu kontrol ettim."),
         ], RiskClass.YELLOW.value)
         turn = core.handle("Kapat")
         self.assertTrue(turn.confirmation_required)
         self.assertIsNotNone(core.pending)
-        confirmed = core.confirm_pending()
+        self.assertEqual(
+            turn.approval["message"],
+            "Bunu yapmadan önce onayını almam gerekiyor.",
+        )
+        confirmed = core.confirm_pending(turn.approval["id"])
         self.assertEqual(confirmed.message, "Onayla bilgisayar durumunu kontrol ettim.")
         self.assertEqual(core.history[-1]["role"], "assistant")
 
