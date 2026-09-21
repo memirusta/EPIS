@@ -148,7 +148,7 @@ class RegressionTests(unittest.TestCase):
         self.assertFalse(turn.tool_results[-1]["ok"])
         assert_protocol(self, core.history)
 
-    def test_long_history_keeps_tool_pairs(self):
+    def test_latest_session_history_keeps_all_turns_and_tool_pairs(self):
         replies = []
         for i in range(15):
             replies.extend([LunaReply(tool_calls=[ToolCall(str(i), "get_system_info", {})]), LunaReply(text="Done")])
@@ -156,7 +156,7 @@ class RegressionTests(unittest.TestCase):
         for _ in range(15):
             core.handle("status")
             assert_protocol(self, core.history)
-        self.assertEqual(sum(m["role"] == "user" for m in core.history), 6)
+        self.assertEqual(sum(m["role"] == "user" for m in core.history), 15)
 
     def test_failure_after_execution_preserves_result_without_replay(self):
         core = build_core([])

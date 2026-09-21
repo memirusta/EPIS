@@ -1,45 +1,32 @@
 """Short-term conversational continuity for EPIS.
 
-This is intentionally separate from daily/weekly/long-term memory.
+This store is intentionally separate from daily/weekly/long-term memory.
 
 Purpose:
-- Preserve recent user <-> EPIS conversation across process restarts.
-- Restore up to the last N hours of ordinary conversation.
+- Preserve the complete latest user <-> EPIS session across process restarts.
+- A session ends only when an explicit conversation boundary is written.
+- Never trim the latest session by age, message count, or character count.
 - Never store raw tool payloads/results here.
-- /new creates a conversation boundary without deleting long-term memory.
+- /new creates a conversation boundary without deleting older raw history.
+
+Older sessions may remain in the append-only JSONL file for nightly/daily
+processing, but only the latest session is restored into active chat context.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-
-
-DEFAULT_HOURS = 5.0
-DEFAULT_MAX_MESSAGES = 240
-DEFAULT_MAX_CHARS = 120_000
 
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _parse_timestamp(value: str) -> datetime | None:
-    try:
-        dt = datetime.fromisoformat(value)
-    except (TypeError, ValueError):
-        return None
-
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-
-    return dt.astimezone(timezone.utc)
-
-
 class HotConversationStore:
-    """Append-only local JSONL store for recent conversational continuity."""
+    """Append-only JSONL store whose active view is the latest session."""
 
     def __init__(
         self,
@@ -51,42 +38,11 @@ class HotConversationStore:
     ):
         self.path = Path(path)
 
-        self.hours = (
-            float(os.getenv("EPIS_HOT_MEMORY_HOURS", str(DEFAULT_HOURS)))
-            if hours is None
-            else float(hours)
-        )
-
-        self.max_messages = (
-            int(
-                os.getenv(
-                    "EPIS_HOT_MEMORY_MAX_MESSAGES",
-                    str(DEFAULT_MAX_MESSAGES),
-                )
-            )
-            if max_messages is None
-            else int(max_messages)
-        )
-
-        self.max_chars = (
-            int(
-                os.getenv(
-                    "EPIS_HOT_MEMORY_MAX_CHARS",
-                    str(DEFAULT_MAX_CHARS),
-                )
-            )
-            if max_chars is None
-            else int(max_chars)
-        )
-
-        if self.hours <= 0:
-            raise ValueError("Hot-memory hours must be positive")
-
-        if self.max_messages <= 0:
-            raise ValueError("Hot-memory max_messages must be positive")
-
-        if self.max_chars <= 0:
-            raise ValueError("Hot-memory max_chars must be positive")
+        # Backward-compatible constructor parameters from the old rolling-window
+        # implementation. Session memory no longer trims by these limits.
+        self.hours = hours
+        self.max_messages = max_messages
+        self.max_chars = max_chars
 
         self.path.parent.mkdir(
             parents=True,
@@ -146,7 +102,7 @@ class HotConversationStore:
             )
 
     def mark_new_conversation(self) -> None:
-        """Start a new hot conversation without deleting historical logs."""
+        """End the active session without deleting older raw session logs."""
         self._append(
             {
                 "type": "boundary",
@@ -154,15 +110,9 @@ class HotConversationStore:
             }
         )
 
-    def load_recent(self) -> list[dict]:
-        """Return recent messages in OpenAI-style role/content format."""
+    def _read_rows(self) -> list[dict]:
         if not self.path.exists():
             return []
-
-        cutoff = (
-            _now_utc()
-            - timedelta(hours=self.hours)
-        )
 
         rows: list[dict] = []
 
@@ -182,50 +132,38 @@ class HotConversationStore:
                     except json.JSONDecodeError:
                         continue
 
-                    if not isinstance(row, dict):
-                        continue
-
-                    ts = _parse_timestamp(
-                        row.get("ts")
-                    )
-
-                    if ts is None:
-                        continue
-
-                    rows.append(
-                        {
-                            **row,
-                            "_parsed_ts": ts,
-                        }
-                    )
+                    if isinstance(row, dict):
+                        rows.append(row)
 
         except OSError:
             return []
 
-        # /new boundary should prevent older turns from returning even if
-        # they're still inside the five-hour time window.
+        return rows
+
+    def load_latest_session(self) -> list[dict]:
+        """Return every user/assistant message after the newest boundary.
+
+        Unlike the old rolling hot-memory window, this method intentionally
+        does not apply a time cutoff, message-count limit, or character limit.
+        The active unit is the latest session, not an arbitrary number of turns.
+        """
+        rows = self._read_rows()
+
         boundary_index = -1
 
         for index, row in enumerate(rows):
             if (
-                row.get("type")
-                == "boundary"
-                and row.get("reason")
-                == "new_conversation"
+                row.get("type") == "boundary"
+                and row.get("reason") == "new_conversation"
             ):
                 boundary_index = index
 
         if boundary_index >= 0:
-            rows = rows[
-                boundary_index + 1 :
-            ]
+            rows = rows[boundary_index + 1 :]
 
-        candidates: list[dict] = []
+        messages: list[dict] = []
 
         for row in rows:
-            if row["_parsed_ts"] < cutoff:
-                continue
-
             if row.get("type") != "message":
                 continue
 
@@ -245,46 +183,15 @@ class HotConversationStore:
             if not content:
                 continue
 
-            candidates.append(
+            messages.append(
                 {
                     "role": role,
                     "content": content,
                 }
             )
 
-        # En yeni mesajları tercih et.
-        if len(candidates) > self.max_messages:
-            candidates = candidates[
-                -self.max_messages :
-            ]
+        return messages
 
-        # Context guard: sondan başlayıp max_chars içine sığanı al.
-        selected_reversed = []
-        used_chars = 0
-
-        for message in reversed(candidates):
-            cost = (
-                len(message["content"])
-                + 32
-            )
-
-            if (
-                selected_reversed
-                and used_chars + cost
-                > self.max_chars
-            ):
-                break
-
-            # Tek bir mesaj max_chars'tan büyükse kırpma yapmıyoruz;
-            # en azından en yeni mesajı koruyoruz.
-            selected_reversed.append(
-                message
-            )
-
-            used_chars += cost
-
-        return list(
-            reversed(
-                selected_reversed
-            )
-        )
+    def load_recent(self) -> list[dict]:
+        """Backward-compatible alias for the latest-session active view."""
+        return self.load_latest_session()
