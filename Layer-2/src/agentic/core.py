@@ -1427,7 +1427,7 @@ class AgentCore:
             }
 
             return AgentTurn(
-                "Bu iÅŸlemi desteklemiyorum.",
+                "Bu eylemi desteklemiyorum.",
                 [result],
             )
 
@@ -1645,16 +1645,17 @@ class AgentCore:
 
         started_at = time.perf_counter()
         try:
-            result = (
-                transport.execute(
-                    spec.capability,
-                    call.arguments,
-                    confirmed=(
-                        confirmed
-                        or session_read_granted
-                    ),
-                    request_id=task_id,
-                )
+            execution_arguments = dict(call.arguments)
+            execution_arguments.pop("device_id", None)
+
+            result = transport.execute(
+                spec.capability,
+                execution_arguments,
+                confirmed=(
+                    confirmed
+                    or session_read_granted
+                ),
+                request_id=task_id,
             )
 
         except Exception as exc:

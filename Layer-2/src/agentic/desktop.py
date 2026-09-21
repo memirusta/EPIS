@@ -6,6 +6,8 @@ import stat
 from pathlib import Path
 import time
 import uuid
+import json
+import subprocess
 
 
 # Discovery is not an arbitrary command/scripting interface.
@@ -22,7 +24,7 @@ class AppEntry:
     name: str
     path: str
     app_id: str
-
+    launch_kind: str = "exe"
 
 def app_entry(name, target):
     if not isinstance(target, str) or not target or any(ord(c) < 32 for c in target):
@@ -45,6 +47,31 @@ def app_entry(name, target):
     app_id = hashlib.sha256(identity.encode()).hexdigest()[:24]
     return AppEntry(str(name)[:100], str(path), app_id)
 
+def start_app_entry(name, target):
+    if not isinstance(name, str) or not isinstance(target, str):
+        return None
+
+    name = name.strip()
+    target = target.strip()
+
+    if (
+        not name
+        or not target
+        or len(name) > 100
+        or len(target) > 512
+        or any(ord(c) < 32 for c in name + target)
+    ):
+        return None
+
+    identity = f"start-app|{target}"
+    app_id = hashlib.sha256(identity.encode()).hexdigest()[:24]
+
+    return AppEntry(
+        name=name,
+        path=target,
+        app_id=app_id,
+        launch_kind="start_app",
+    )
 
 def registered_apps():
     import winreg
@@ -105,17 +132,47 @@ def start_menu_apps():
 
 
 class AppCatalog:
-    def __init__(self, sources=None):
-        self.sources = sources or (registered_apps, start_menu_apps)
+    def __init__(self, sources=None, start_sources=None):
+        if sources is None:
+            self.sources = (
+                registered_apps,
+                start_menu_apps,
+            )
+            self.start_sources = (
+                start_sources
+                if start_sources is not None
+                else (windows_start_apps,)
+            )
+        else:
+            self.sources = sources
+            self.start_sources = start_sources or ()
 
     def entries(self):
-        entries = {}
+        entries_by_name = {}
+
+        # Windows'un kendi uygulama kataloğunu tercih et.
+        for source in self.start_sources:
+            for name, target in source():
+                entry = start_app_entry(name, target)
+
+                if entry:
+                    entries_by_name.setdefault(
+                        entry.name.casefold(),
+                        entry,
+                    )
+
+        # Registry / klasik EXE discovery fallback.
         for source in self.sources:
             for name, target in source():
                 entry = app_entry(name, target)
+
                 if entry:
-                    entries.setdefault(entry.app_id, entry)
-        return list(entries.values())
+                    entries_by_name.setdefault(
+                        entry.name.casefold(),
+                        entry,
+                    )
+
+        return list(entries_by_name.values())
 
     def discover(self, arguments):
         query = arguments.get("query", "").casefold().strip()
@@ -123,15 +180,101 @@ class AppCatalog:
         matches.sort(key=lambda item: item.name.casefold())
         return {"ok": True, "apps": [{"app_id": entry.app_id, "app_name": entry.name} for entry in matches[:50]],
                 "truncated": len(matches) > 50,
-                "limitations": "Registry and argument-free Start Menu EXEs only; not all Store/portable apps. No filesystem paths returned."}
+                "limitations":(
+    "Windows Start Apps, Registry App Paths and "
+    "argument-free Start Menu EXEs are indexed. "
+    "Filesystem paths and raw Windows AppIDs are "
+    "never returned."
+                ),}
 
     def launch(self, arguments):
         entry = next((entry for entry in self.entries() if entry.app_id == arguments["app_id"]), None)
         if not entry or entry.name != arguments["app_name"]:
             return {"ok": False, "error": "Application selection expired or mismatched; discover again"}
-        os.startfile(entry.path)
-        return {"ok": True, "message": f"{entry.name} launch requested; visible window not yet verified"}
+        if entry.launch_kind == "start_app":
+            try:
+                subprocess.Popen(
+                    [
+                        "explorer.exe",
+                        f"shell:AppsFolder\\{entry.path}",
+                    ],
+                    close_fds=True,
+                )
+            except OSError as exc:
+                return {
+                 "ok": False,
+                 "error": (
+                      "Windows Start app launch failed: "
+                     f"{type(exc).__name__}"
+                  ),
+              }
+        else:
+            os.startfile(entry.path)
+            return {"ok": True, "message": f"{entry.name} launch requested; visible window not yet verified"}
 
+def windows_start_apps():
+    if os.name != "nt":
+        return
+
+    command = (
+        "[Console]::OutputEncoding = "
+        "[System.Text.UTF8Encoding]::new($false); "
+        "Get-StartApps | "
+        "Select-Object Name,AppID | "
+        "ConvertTo-Json -Compress"
+    )
+
+    try:
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                command,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+            creationflags=getattr(
+                subprocess,
+                "CREATE_NO_WINDOW",
+                0,
+            ),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+
+    if completed.returncode != 0:
+        return
+
+    raw = completed.stdout.strip()
+    if not raw:
+        return
+
+    try:
+        rows = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+
+    if isinstance(rows, dict):
+        rows = [rows]
+
+    if not isinstance(rows, list):
+        return
+
+    for row in rows[:1024]:
+        if not isinstance(row, dict):
+            continue
+
+        name = row.get("Name")
+        app_id = row.get("AppID")
+
+        if isinstance(name, str) and isinstance(app_id, str):
+            yield name, app_id
 
 class Win32Windows:
     def enumerate(self):

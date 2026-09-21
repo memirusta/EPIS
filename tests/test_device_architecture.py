@@ -1,3 +1,4 @@
+from ast import arguments
 import json
 import os
 from pathlib import Path
@@ -165,6 +166,35 @@ class DeviceArchitectureTests(unittest.TestCase):
         result = core._dispatch(ToolCall("a", "get_system_info", {"device_id": "second"}), False)
         self.assertEqual(result.tool_results[0]["from"], "second")
         second.dispatcher.assert_called_once()
+        
+        def test_device_id_is_routing_metadata_not_forwarded_to_worker_arguments(self):
+            core = build_core([])
+            self.addCleanup(core.close)
+        
+            with patch.dict(os.environ, {"EPIS_DEVICE_ID": "second"}):
+                second = LocalDeviceAgent(
+                    core.devices,
+                    Mock(return_value={"ok": True}),
+                    {"system.info"},
+                )
+
+            second.execute = Mock(return_value={"ok": True})
+            core.attach_transport(second)
+
+            result = core._dispatch(
+                ToolCall(
+                    "route-1",
+                    "get_system_info",
+                    {"device_id": "second"},
+                ),
+                False,
+            )
+
+            self.assertTrue(result.tool_results[0]["ok"])
+            second.execute.assert_called_once()
+
+            _, arguments = second.execute.call_args.args
+            self.assertNotIn("device_id", arguments)
 
     def test_cloud_placeholder_routes_default_call_to_connected_device_and_records_usage(self):
         core = build_core([])
