@@ -556,6 +556,31 @@ class WindowController:
             "window_content_collected": False,
         }
 
+    def wait_for_window(self, arguments):
+        """Poll for a newly launched app window instead of racing app startup."""
+        timeout = int(arguments.get("timeout_seconds", 8))
+        deadline = time.monotonic() + timeout
+
+        while True:
+            result = self.list_windows({
+                "app_name": arguments.get("app_name", ""),
+            })
+            count = len(result["windows"])
+
+            if count == 1:
+                result["status"] = "window_found"
+                return result
+
+            if count > 1:
+                result["status"] = "window_ambiguous"
+                return result
+
+            if time.monotonic() >= deadline:
+                result["status"] = "window_wait_timeout"
+                return result
+
+            time.sleep(0.2)
+
     def act(self, arguments, action):
         saved = self.snapshot.get(arguments["window_id"])
         if not saved or saved[1] < time.monotonic():
@@ -679,6 +704,28 @@ def register_desktop_tools(registry):
             ),
         ),
         windows.list_windows,
+    )
+
+    registry.register(
+        ToolSpec(
+            "wait_for_window",
+            (
+                "After launching an app, wait briefly for exactly one matching "
+                "visible window to appear. Use this instead of calling list_windows "
+                "immediately after launch. Returns the same opaque window selection "
+                "shape as list_windows and never reads window titles/content."
+            ),
+            schema({
+                "app_name": {"type": "string", "maxLength": 100},
+                "timeout_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 15,
+                },
+            }, ("app_name",)),
+            "windows.wait",
+        ),
+        windows.wait_for_window,
     )
 
     selection = schema(

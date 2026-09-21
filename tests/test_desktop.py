@@ -93,6 +93,22 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(control.act(window, "minimize")["ok"])
         backend.apply.assert_called_once()
 
+    def test_wait_for_window_polls_until_matching_window_exists(self):
+        backend = Mock()
+        backend.enumerate.side_effect = [
+            [],
+            [{"hwnd": 42, "pid": 5, "created": 123.0,
+              "process": "nebula.exe", "class": "Nebula", "minimized": False}],
+        ]
+        control = WindowController(backend)
+        with patch("agentic.desktop.time.sleep"):
+            result = control.wait_for_window({
+                "app_name": "Nebula",
+                "timeout_seconds": 2,
+            })
+        self.assertEqual(result["status"], "window_found")
+        self.assertEqual(len(result["windows"]), 1)
+
     def test_window_identity_and_expiry_fail_closed(self):
         for field, changed in (("pid", 7), ("created", 999), ("class", "Different"), ("process", "other.exe")):
             control, backend = self.windows()

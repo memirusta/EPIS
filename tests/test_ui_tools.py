@@ -31,12 +31,16 @@ class FakeBackend:
         self.process_name = process_name
         self.hwnd = 42
         self.keys = []
+        self.navigated = []
 
     def inspect_foreground(self, max_depth):
         return self.hwnd, self.process_name, list(self.controls)
 
     def foreground_handle(self):
         return self.hwnd
+
+    def foreground_process(self):
+        return self.process_name
 
     def meta(self, control):
         return {
@@ -55,6 +59,9 @@ class FakeBackend:
 
     def send_keys(self, keys):
         self.keys.append(keys)
+
+    def navigate_https(self, url):
+        self.navigated.append(url)
 
 
 class UIToolTests(unittest.TestCase):
@@ -123,6 +130,24 @@ class UIToolTests(unittest.TestCase):
         )
         self.assertFalse(result["ok"])
         self.assertEqual(button.clicked, 0)
+
+    def test_https_navigation_is_routine_only_for_supported_foreground_browser(self):
+        backend = FakeBackend([], process_name="Nebula.exe")
+        controller = UIController(backend)
+        result = controller.navigate_https({"url": "https://www.youtube.com/"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            backend.navigated,
+            ["https://www.youtube.com/"],
+        )
+
+        backend.process_name = "Code.exe"
+        denied = controller.navigate_https({"url": "https://www.youtube.com/"})
+        self.assertFalse(denied["ok"])
+
+        backend.process_name = "Nebula.exe"
+        unsafe = controller.navigate_https({"url": "http://example.com/"})
+        self.assertFalse(unsafe["ok"])
 
 
 if __name__ == "__main__":

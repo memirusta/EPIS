@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import time
 import uuid
+from urllib.parse import urlsplit
 
 
 ELEMENT_TTL_SECONDS = 60
@@ -69,6 +70,16 @@ SENSITIVE_HOTKEYS = {
     "delete": "{Delete}",
 }
 
+SUPPORTED_BROWSER_PROCESSES = frozenset({
+    "brave.exe",
+    "chrome.exe",
+    "firefox.exe",
+    "msedge.exe",
+    "nebula.exe",
+    "opera.exe",
+    "vivaldi.exe",
+})
+
 
 class WindowsUIBackend:
     def inspect_foreground(self, max_depth: int):
@@ -95,6 +106,17 @@ class WindowsUIBackend:
     def foreground_handle(self) -> int:
         import win32gui
         return int(win32gui.GetForegroundWindow())
+
+    def foreground_process(self) -> str:
+        import psutil
+        import win32gui
+        import win32process
+
+        hwnd = int(win32gui.GetForegroundWindow())
+        if not hwnd:
+            raise RuntimeError("No foreground window")
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        return psutil.Process(pid).name()
 
     @staticmethod
     def meta(control) -> dict:
@@ -124,6 +146,21 @@ class WindowsUIBackend:
     def send_keys(keys: str) -> None:
         import uiautomation as auto
         auto.SendKeys(keys)
+
+    @staticmethod
+    def navigate_https(url: str) -> None:
+        import uiautomation as auto
+
+        auto.SendKeys("{Ctrl}l")
+        time.sleep(0.05)
+        focused = auto.GetFocusedControl()
+        if focused is None:
+            raise RuntimeError("Browser address bar unavailable")
+        role = str(getattr(focused, "ControlTypeName", "") or "")
+        if role != "EditControl" or bool(getattr(focused, "IsPassword", False)):
+            raise RuntimeError("Browser address bar unavailable")
+        focused.GetValuePattern().SetValue(url)
+        auto.SendKeys("{Enter}")
 
 
 @dataclass
@@ -417,6 +454,58 @@ class UIController:
             "effect_verified": False,
         }
 
+    def navigate_https(self, arguments: dict) -> dict:
+        url = str(arguments["url"]).strip()
+        try:
+            parsed = urlsplit(url)
+            valid = (
+                parsed.scheme == "https"
+                and parsed.hostname
+                and not parsed.username
+                and not parsed.password
+                and parsed.port in (None, 443)
+                and "\\" not in url
+                and not any(c.isspace() or ord(c) < 32 for c in url)
+            )
+        except ValueError:
+            valid = False
+
+        if not valid:
+            return {
+                "ok": False,
+                "error": "ui_navigation_requires_safe_https_url",
+            }
+
+        try:
+            process_name = self.backend.foreground_process()
+        except Exception:
+            return {
+                "ok": False,
+                "error": "ui_foreground_unavailable",
+            }
+
+        if process_name.casefold() not in SUPPORTED_BROWSER_PROCESSES:
+            return {
+                "ok": False,
+                "error": "ui_foreground_is_not_supported_browser",
+                "process_name": process_name,
+            }
+
+        try:
+            self.backend.navigate_https(url)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"ui_browser_navigation_failed:{type(exc).__name__}",
+            }
+
+        return {
+            "ok": True,
+            "status": "navigation_requested",
+            "browser_process": process_name,
+            "page_load_verified": False,
+        }
+
     def wait(self, arguments: dict) -> dict:
         query = arguments["name"].casefold().strip()
         role = arguments.get("role")
@@ -620,6 +709,23 @@ def register_ui_tools(registry):
             "ui.scroll",
         ),
         controller.scroll,
+    )
+    registry.register(
+        ToolSpec(
+            "ui_navigate_https",
+            (
+                "Navigate the CURRENT foreground supported browser to an exact safe "
+                "HTTPS URL using its address bar. Use after wait_for_window + "
+                "focus_window for requests like 'open Nebula and go to YouTube'. "
+                "This is routine navigation only; it cannot submit forms or enter "
+                "passwords, and page load is not automatically verified."
+            ),
+            schema({
+                "url": {"type": "string", "maxLength": 2048},
+            }, ("url",)),
+            "browser.navigate_foreground",
+        ),
+        controller.navigate_https,
     )
     registry.register(
         ToolSpec(

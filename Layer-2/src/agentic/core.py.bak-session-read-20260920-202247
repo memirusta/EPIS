@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import time
-import uuid
 from typing import Any
 
 from .devices import DeviceRegistry
@@ -21,12 +20,6 @@ from .transport import DeviceTransport
 
 logger = logging.getLogger("EPIS.AGENT")
 
-_SESSION_READ_CAPABILITIES = frozenset({
-    "files.list",
-    "files.info",
-    "files.read_text",
-})
-
 
 @dataclass
 class PendingAction:
@@ -37,8 +30,6 @@ class PendingAction:
     results: list[dict] = field(default_factory=list)
     model_steps: int = 0
     sol_delegations: int = 0
-    approval_id: str = ""
-    approval_message: str = ""
     expires_at: float = field(
         default_factory=lambda: time.monotonic() + 120
     )
@@ -49,7 +40,6 @@ class AgentTurn:
     message: str
     tool_results: list[dict]
     confirmation_required: bool = False
-    approval: dict[str, Any] | None = None
 
 
 class SolDelegator:
@@ -188,7 +178,6 @@ class AgentCore:
         sol: SolDelegator | None = None,
         tasks: TaskStore | None = None,
         hot_memory=None,
-        usage_repository=None,
     ):
         self.luna = luna
         self.system_prompt = system_prompt
@@ -201,7 +190,6 @@ class AgentCore:
         self.sol = sol or SolDelegator()
 
         self.hot_memory = hot_memory
-        self.usage_repository = usage_repository
         self.history: list[dict] = []
         self.restored_hot_messages = 0
 
@@ -218,10 +206,6 @@ class AgentCore:
         }
 
         self._call_tasks: dict[str, str] = {}
-
-        # Salt-okuma izinleri yalnizca bu EPIS processinde yasar.
-        # EPIS kapaninca otomatik olarak unutulur.
-        self._session_read_grants: set[tuple[str, str]] = set()
 
         self._restore_hot_history()
 
@@ -313,151 +297,16 @@ class AgentCore:
 
         return cleaned
 
-    @staticmethod
-    def _approval_safe_arguments(arguments: dict) -> dict:
-        """Bound approval-copy context without echoing file/message bodies."""
-        safe: dict[str, Any] = {}
-        hidden_keys = {
-            "content", "body", "message", "text", "token",
-            "password", "secret", "api_key", "authorization",
-        }
-
-        for key, value in (arguments or {}).items():
-            if key == "device_id":
-                continue
-            if key.casefold() in hidden_keys:
-                length = len(value) if isinstance(value, str) else None
-                safe[key] = (
-                    f"<content omitted; {length} chars>"
-                    if length is not None
-                    else "<content omitted>"
-                )
-                continue
-            if isinstance(value, str) and len(value) > 500:
-                safe[key] = value[:500] + "…"
-            else:
-                safe[key] = value
-
-        return safe
-
-    def _approval_message(
-        self,
-        approval: dict,
-        user_message: str,
-    ) -> str:
-        """Ask Luna for approval-card copy; policy remains deterministic."""
-        payload = {
-            "requested_by_user": user_message,
-            "tool": approval.get("tool"),
-            "capability": approval.get("capability"),
-            "risk": approval.get("risk"),
-            "target": approval.get("target"),
-            "arguments": self._approval_safe_arguments(
-                approval.get("arguments") or {}
-            ),
-            "policy_reason": approval.get("reason"),
-            "safety_note": approval.get("notice"),
-        }
-
-        try:
-            reply = self.luna.complete(
-                [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Sen EPIS'in Luna sesisin. Aşağıdaki bekleyen işlem "
-                            "için onay kartında gösterilecek 1-2 kısa, doğal Türkçe "
-                            "cümle yaz. Neyi yapacağını ve neden kullanıcı onayı "
-                            "gerektiğini somut söyle. Evet/Hayır, buton, JSON, başlık "
-                            "veya madde işareti yazma. İşlem yapılmış gibi konuşma. "
-                            "Verilmeyen ayrıntıyı uydurma. Teknik policy metnini "
-                            "kelimesi kelimesine tekrar etme; EPIS'in doğal sesiyle yaz."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            payload,
-                            ensure_ascii=False,
-                        ),
-                    },
-                ],
-                [],
-            )
-            text = (reply.text or "").strip()
-            if text:
-                return text
-        except Exception as exc:
-            self._log(
-                "approval_copy_failed",
-                error=type(exc).__name__,
-            )
-
-        # Fail-safe only when Luna is unavailable. The normal UI copy is model-owned.
-        return (
-            str(approval.get("notice") or "").strip()
-            or "Bu işlem devam etmeden önce onayını gerektiriyor."
-        )
-
-    def _online_capabilities(self) -> set[str]:
-        """Refresh transports and return capabilities on live devices only."""
-        for transport in list(self.transports.values()):
-            try:
-                transport.refresh()
-            except Exception as exc:
-                self._log(
-                    "device_refresh_failed",
-                    error=type(exc).__name__,
-                )
-
-        capabilities: set[str] = set()
-        for device in self.devices.list_public():
-            if not device.get("online"):
-                continue
-            capabilities.update(device.get("capabilities") or [])
-        return capabilities
-
-    def _live_capability_manifest(self) -> dict:
-        """Small model-facing truth source for current device/tool availability."""
-        capabilities = self._online_capabilities()
-        tools = []
-        for spec in self.registry.specs():
-            if spec.capability not in capabilities:
-                continue
-            decision = self.permissions.decide(spec, {})
-            tools.append({
-                "name": spec.name,
-                "capability": spec.capability,
-                "risk": spec.risk_class,
-                "approval_required": bool(
-                    decision.requires_confirmation
-                ),
-            })
-
-        devices = []
-        for device in self.devices.list_public():
-            if not device.get("online"):
-                continue
-            devices.append({
-                "name": device.get("display_name"),
-                "platform": device.get("platform"),
-                "capabilities": device.get("capabilities") or [],
-            })
-
-        return {
-            "devices": devices,
-            "tools": tools,
-        }
-
     def handle(
         self,
         user_message: str,
     ) -> AgentTurn:
-        # A pending approval is independent from ordinary conversation.
-        # The user may keep chatting while the approval card remains visible.
-        # Keep the original task receipt mapping alive until that approval resolves.
-        if self.pending is None:
-            self._call_tasks = {}
+        if self.pending:
+            # A new request must never inherit approval
+            # for an older action.
+            self.reject_pending()
+
+        self._call_tasks = {}
 
         self._refresh_hot_history()
 
@@ -488,13 +337,6 @@ class AgentCore:
         system = (
             self.system_prompt
             + "\n\n# AGENT SINIRI\n"
-            + (
-                "Tool result status/error alanlari makine gercekleridir; "
-                "bunlari kullaniciya ham metin gibi tekrar etme. "
-                "Sonucu EPIS'in dogal sesiyle sentezle. "
-                "Bir sonuc verified=False veya benzeri bir alan tasiyorsa "
-                "dogrulanmamis bir durumu dogrulanmis gibi soyleme. "
-            )
             + (
                 "Tool sonucu gÃ¶rmeden iÅŸlem yapÄ±lmÄ±ÅŸ gibi konuÅŸma. "
                 "Tool Ã§aÄŸrÄ±larÄ± yalnÄ±zca Ã¶neridir; Core izin ve cihaz "
@@ -541,61 +383,15 @@ class AgentCore:
                 "KullanÄ±cÄ± desteklenen bir iÅŸlemi istediyse uygun tool "
                 "Ã§aÄŸrÄ±sÄ±nÄ± Ã¶ner. "
 
-                "Onay gereken bir araÃ§ iÃ§in tool Ã§aÄŸrÄ±sÄ±nÄ± normal ÅŸekilde Ã¼ret; "
-                "onay kararÄ±nÄ± model verme. Core iÅŸlemi durdurur, Luna'dan ayrÄ± "
-                "bir doÄŸal onay aÃ§Ä±klamasÄ± Ã¼rettirir ve UI Evet/HayÄ±r kartÄ± gÃ¶sterir. "
-                "Onay gelmeden iÅŸlemi yapÄ±lmÄ±ÅŸ sayma. "
+                "Onay gereken araÃ§ iÃ§in ayrÄ±ca sohbetle 'onaylÄ±yor musun' "
+                "diye sorup turu bitirme: tool Ã§aÄŸrÄ±sÄ±nÄ± Ã¼ret; Core iÅŸlemi "
+                "DURDURUP kullanÄ±cÄ±dan evet/hayÄ±r alÄ±r. "
 
-                "Uygulama açma isteklerinde kullanıcı uygulamayı takma ad, renk, "
-                "kategori, kısaltma veya komut adıyla tarif edebilir. Bunu semantik "
-                "olarak muhtemel kanonik uygulama adına çevirip discover_apps ile ara; "
-                "sonuç yoksa bir kez daha genelleştirerek ara. Yalnızca gerçekten "
-                "dönen app_id/app_name çiftini launch_discovered_app ile aç; yol veya "
-                "uygulama kimliği uydurma. Komut istemcileri de uygulama olarak açılabilir, "
-                "ama bu onların içinde komut çalıştırma izni vermez. "
+                "Bu, izni atlamak deÄŸildir; onay UI'si yalnÄ±zca Core'un "
+                "sorumluluÄŸudur. "
 
                 "AraÃ§ argÃ¼manlarÄ± belirsizse aÃ§Ä±klayÄ±cÄ± soru sor. "
                 "Desteklenmeyen iÅŸlemi desteklenmiÅŸ sayma."
-            )
-        )
-
-        live_manifest = self._live_capability_manifest()
-        system += (
-            "\n\n# LIVE CAPABILITIES\n"
-            + json.dumps(
-                live_manifest,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-            + (
-                "\nWhen describing what you can do, treat this live manifest "
-                "and the function schemas in this request as the source of truth. "
-                "Do not rely on old chat claims or generic model knowledge about "
-                "your capabilities. If a capability is absent, do not claim it is "
-                "currently available. "
-            )
-            + (
-                "\n\n# GOAL EXECUTION\n"
-                "For multi-step user goals, do not stop after the first successful "
-                "tool call. Continue until every requested part is completed, "
-                "blocked, needs user approval/clarification, or the bounded tool "
-                "budget is exhausted. Prefer dedicated/API tools first, then UI "
-                "Automation as a fallback. For named Spotify-track playback, prefer "
-                "spotify_search_tracks -> spotify_devices when needed -> "
-                "spotify_play_track when those tools are live; do not infer the "
-                "limitations of the legacy search_spotify browser fallback. "
-                "For UI Automation, inspect first and use only returned opaque refs. "
-                "After launch_discovered_app returns launch_requested with an "
-                "unverified visible window, do not immediately assume failure and "
-                "do not call list_windows only once. If wait_for_window is live, "
-                "wait for the launched app, then focus the returned window before "
-                "using foreground UI tools. For a request to open a specific browser "
-                "and navigate to an HTTPS site, prefer wait_for_window -> focus_window "
-                "-> ui_navigate_https when those tools are live. "
-                "Routine UI tools must never be used to bypass a sensitive UI tool. "
-                "After an action, if the result says verification is false and a "
-                "matching read/inspect tool exists, verify before claiming the final "
-                "state. If outcome is unknown, never retry automatically."
             )
         )
 
@@ -603,15 +399,6 @@ class AgentCore:
             system += (
                 "\n\n# ANLIK BAGLAM\n"
                 + context
-            )
-
-        if self.pending is not None:
-            system += (
-                "\n\n# BEKLEYEN ONAY\n"
-                "UI'da ayrı bir işlem onay bekliyor. Kullanıcı bu sırada "
-                "normal sohbet etmeye devam edebilir. Yeni mesajı eski işlemin "
-                "onayı veya reddi sayma; eski işlemi yapılmış da sayma. "
-                "Evet/Hayır butonları Core tarafından ayrı yönetilir."
             )
 
         messages = [
@@ -631,202 +418,12 @@ class AgentCore:
             user_message,
         )
 
-
-    @staticmethod
-    def _normalize_session_read_path(
-        value: Any,
-    ) -> str | None:
-        if (
-            not isinstance(value, str)
-            or not value.strip()
-        ):
-            return None
-
-        raw = value.strip()
-
-        # Network / UNC path session grant alamaz.
-        if (
-            raw.startswith("\\")
-            or not os.path.isabs(raw)
-        ):
-            return None
-
-        normalized = os.path.normcase(
-            os.path.abspath(
-                os.path.normpath(raw)
-            )
-        )
-
-        drive, _ = os.path.splitdrive(
-            normalized
-        )
-
-        if not drive:
-            return None
-
-        return normalized
-
-    def _session_read_root_for_call(
-        self,
-        capability: str,
-        arguments: dict,
-    ) -> str | None:
-        if (
-            capability
-            not in _SESSION_READ_CAPABILITIES
-        ):
-            return None
-
-        path = (
-            self._normalize_session_read_path(
-                arguments.get("path")
-            )
-        )
-
-        if not path:
-            return None
-
-        # list_folder zaten klasor alir.
-        # info/read dosya alir, bu durumda parent root olur.
-        if capability == "files.list":
-            root = path
-        else:
-            root = os.path.dirname(
-                path
-            )
-
-        drive, _ = os.path.splitdrive(
-            root
-        )
-
-        # D:\ gibi tum diski tek onayla acma.
-        if (
-            root.rstrip("/\\")
-            == drive.rstrip("/\\")
-        ):
-            return None
-
-        return root
-
-    @staticmethod
-    def _path_is_inside_root(
-        path: str,
-        root: str,
-    ) -> bool:
-        try:
-            return (
-                os.path.commonpath(
-                    [path, root]
-                )
-                == root
-            )
-
-        except (
-            ValueError,
-            OSError,
-        ):
-            return False
-
-    def _has_session_read_grant(
-        self,
-        capability: str,
-        arguments: dict,
-        device_id: str,
-    ) -> bool:
-        if (
-            capability
-            not in _SESSION_READ_CAPABILITIES
-        ):
-            return False
-
-        path = (
-            self._normalize_session_read_path(
-                arguments.get("path")
-            )
-        )
-
-        if not path:
-            return False
-
-        return any(
-            (
-                granted_device
-                == device_id
-                and self._path_is_inside_root(
-                    path,
-                    root,
-                )
-            )
-            for (
-                granted_device,
-                root,
-            )
-            in self._session_read_grants
-        )
-
-    def _grant_session_read_for_call(
-        self,
-        capability: str,
-        arguments: dict,
-        device_id: str,
-    ) -> str | None:
-        root = (
-            self._session_read_root_for_call(
-                capability,
-                arguments,
-            )
-        )
-
-        if not root:
-            return None
-
-        self._session_read_grants.add(
-            (
-                device_id,
-                root,
-            )
-        )
-
-        self._log(
-            "session_read_granted",
-            device=device_id,
-            root=root,
-        )
-
-        return root
-
-    def _supersede_pending(self) -> None:
-        """Cancel one older pending action when a newer approval replaces it."""
-        if self.pending is None:
-            return
-
-        pending, self.pending = self.pending, None
-        for call in [pending.tool_call, *pending.remaining_calls]:
-            task_id = self._call_tasks.get(call.call_id)
-            if task_id:
-                self.tasks.finish(task_id, "cancelled")
-
-        self._log(
-            "pending_approval_superseded",
-            tool=pending.tool_call.name,
-        )
-
     def confirm_pending(
         self,
-        approval_id: str | None = None,
     ) -> AgentTurn:
         if not self.pending:
             return AgentTurn(
                 "Onay bekleyen bir iÅŸlem yok.",
-                [],
-            )
-
-        if (
-            approval_id is not None
-            and approval_id != self.pending.approval_id
-        ):
-            return AgentTurn(
-                "Bu onay isteği artık geçerli değil.",
                 [],
             )
 
@@ -844,31 +441,11 @@ class AgentCore:
             turn = self.reject_pending()
 
             turn.message = (
-                "Onayın süresi doldu; işlem yapılmadı. "
-                "İstersen yeniden iste."
+                "OnayÄ±n sÃ¼resi doldu; iÅŸlem yapÄ±lmadÄ±. "
+                "Ä°stersen yeniden iste."
             )
 
             return turn
-
-        entry = self.registry.get(
-            pending.tool_call.name
-        )
-
-        if entry:
-            pending_spec, _ = entry
-
-            pending_device = (
-                pending.tool_call.arguments.get(
-                    "device_id"
-                )
-                or self.local_agent.device.device_id
-            )
-
-            self._grant_session_read_for_call(
-                pending_spec.capability,
-                pending.tool_call.arguments,
-                pending_device,
-            )
 
         turn = self._dispatch(
             pending.tool_call,
@@ -896,20 +473,10 @@ class AgentCore:
 
     def reject_pending(
         self,
-        approval_id: str | None = None,
     ) -> AgentTurn:
         if not self.pending:
             return AgentTurn(
                 "Onay bekleyen bir iÅŸlem yok.",
-                [],
-            )
-
-        if (
-            approval_id is not None
-            and approval_id != self.pending.approval_id
-        ):
-            return AgentTurn(
-                "Bu onay isteği artık geçerli değil.",
                 [],
             )
 
@@ -1019,7 +586,7 @@ class AgentCore:
 
         while (
             calls
-            or model_steps < 4
+            or model_steps < 32
         ):
             if not calls:
                 try:
@@ -1128,7 +695,7 @@ class AgentCore:
                     continue
 
                 if (
-                    model_steps >= 4
+                    model_steps >= 32
                     or len(results) >= 64
                 ):
                     result = {
@@ -1201,16 +768,6 @@ class AgentCore:
                 if (
                     turn.confirmation_required
                 ):
-                    approval = dict(turn.approval or {})
-                    approval_id = uuid.uuid4().hex
-                    approval_message = self._approval_message(
-                        approval,
-                        user_message,
-                    )
-
-                    if self.pending is not None:
-                        self._supersede_pending()
-
                     self.pending = (
                         PendingAction(
                             deepcopy(call),
@@ -1225,23 +782,10 @@ class AgentCore:
                         )
                     )
 
-                    approval_payload = {
-                        "id": approval_id,
-                        "message": approval_message,
-                        "tool": approval.get("tool", call.name),
-                        "capability": approval.get("capability"),
-                        "risk": approval.get("risk"),
-                    }
-                    # Store UI identity alongside the pending action without
-                    # exposing it to device execution arguments.
-                    self.pending.approval_id = approval_id
-                    self.pending.approval_message = approval_message
-
                     return AgentTurn(
-                        "",
+                        turn.message,
                         results,
                         True,
-                        approval_payload,
                     )
 
                 for result in (
@@ -1524,7 +1068,7 @@ class AgentCore:
             }
 
             return AgentTurn(
-                "Bu eylemi desteklemiyorum.",
+                "Bu iÅŸlemi desteklemiyorum.",
                 [result],
             )
 
@@ -1571,36 +1115,11 @@ class AgentCore:
                 ],
             )
 
-        requested_device = call.arguments.get(
-            "device_id"
-        )
-        local_device = self.local_agent.device
-        preferred_device = requested_device
-        if (
-            preferred_device is None
-            and local_device.online
-            and spec.capability in local_device.capabilities
-        ):
-            preferred_device = local_device.device_id
-
-        if preferred_device:
-            preferred_transport = self.transports.get(
-                preferred_device
-            )
-            if preferred_transport:
-                preferred_transport.refresh()
-
-        device = self.devices.find_capable(
-            spec.capability,
-            preferred_device=preferred_device,
-        )
         target_device = (
-            device.device_id
-            if device is not None
-            else (
-                requested_device
-                or local_device.device_id
+            call.arguments.get(
+                "device_id"
             )
+            or self.local_agent.device.device_id
         )
 
         if (
@@ -1620,58 +1139,58 @@ class AgentCore:
             ]
         )
 
-        session_read_target_device = target_device
-
-        session_read_root = (
-            self._session_read_root_for_call(
-                spec.capability,
-                call.arguments,
-            )
-        )
-
-        session_read_granted = (
-            self._has_session_read_grant(
-                spec.capability,
-                call.arguments,
-                session_read_target_device,
-            )
-        )
-
         if (
             decision.requires_confirmation
             and not confirmed
-            and not session_read_granted
         ):
-            target = (
-                device.display_name
-                if device is not None
-                else target_device
+            detail = json.dumps(
+                call.arguments,
+                ensure_ascii=False,
             )
-            reason = decision.reason
-            notice = spec.confirmation_notice
 
-            if session_read_root:
-                reason = "session read access requires confirmation"
-                notice = (
-                    "Bu klasör altında salt-okuma erişimi verilecek; "
-                    "okunan veriler model API'sine gönderilebilir. "
-                    "Yazma, kopyalama, taşıma ve shell dahil değildir."
+            target = (
+                call.arguments.get(
+                    "device_id"
                 )
+                or self.local_agent.device.display_name
+            )
+
+            notice = (
+                f" {spec.confirmation_notice}"
+                if spec.confirmation_notice
+                else ""
+            )
 
             return AgentTurn(
-                "",
+                (
+                    f"{target}: "
+                    f"{call.name} "
+                    f"{detail}."
+                    f"{notice} "
+                    "OnaylÄ±yor musun? "
+                    "(evet/hayÄ±r)"
+                ),
                 [],
                 True,
-                {
-                    "tool": call.name,
-                    "capability": spec.capability,
-                    "risk": spec.risk_class,
-                    "target": target,
-                    "arguments": deepcopy(call.arguments),
-                    "reason": reason,
-                    "notice": notice,
-                },
             )
+
+        transport = (
+            self.transports.get(
+                target_device
+            )
+        )
+
+        if transport:
+            transport.refresh()
+
+        device = (
+            self.devices.find_capable(
+                spec.capability,
+                preferred_device=(
+                    target_device
+                ),
+            )
+        )
 
         if not device:
             self.tasks.finish(
@@ -1694,10 +1213,6 @@ class AgentCore:
                     }
                 ],
             )
-
-        transport = self.transports.get(
-            device.device_id
-        )
 
         if not transport:
             self.tasks.finish(
@@ -1740,19 +1255,14 @@ class AgentCore:
                 ],
             )
 
-        started_at = time.perf_counter()
         try:
-            execution_arguments = dict(call.arguments)
-            execution_arguments.pop("device_id", None)
-
-            result = transport.execute(
-                spec.capability,
-                execution_arguments,
-                confirmed=(
-                    confirmed
-                    or session_read_granted
-                ),
-                request_id=task_id,
+            result = (
+                transport.execute(
+                    spec.capability,
+                    call.arguments,
+                    confirmed=confirmed,
+                    request_id=task_id,
+                )
             )
 
         except Exception as exc:
@@ -1762,13 +1272,6 @@ class AgentCore:
                 "error": (
                     type(exc).__name__
                 ),
-            }
-
-        if not isinstance(result, dict):
-            result = {
-                "ok": False,
-                "outcome": "unknown",
-                "error": "Invalid device result",
             }
 
         state = (
@@ -1787,16 +1290,6 @@ class AgentCore:
         self.tasks.finish(
             task_id,
             state,
-        )
-
-        self._record_tool_usage(
-            operation=call.name,
-            capability=spec.capability,
-            status=state,
-            latency_ms=round(
-                (time.perf_counter() - started_at) * 1000
-            ),
-            device_id=device.device_id,
         )
 
         self._log(
@@ -1860,24 +1353,23 @@ class AgentCore:
                 )
             )
 
-        if os.getenv("EPIS_DEPLOYMENT", "local").lower() != "cloud":
-            try:
-                self.memory.log_interaction(
-                    "agent_turn",
-                    (
-                        f"kullanÄ±cÄ±: {user_message}\n"
-                        f"EPIS: {response}"
-                    ),
-                    tags=[
-                        "agentic-0.1",
-                    ],
-                )
+        try:
+            self.memory.log_interaction(
+                "agent_turn",
+                (
+                    f"kullanÄ±cÄ±: {user_message}\n"
+                    f"EPIS: {response}"
+                ),
+                tags=[
+                    "agentic-0.1",
+                ],
+            )
 
-            except Exception as exc:
-                self._log(
-                    "memory_write_failed",
-                    error=type(exc).__name__,
-                )
+        except Exception as exc:
+            self._log(
+                "memory_write_failed",
+                error=type(exc).__name__,
+            )
 
     @staticmethod
     def _conversation_only(
@@ -1954,11 +1446,8 @@ class AgentCore:
     def _model_tools(
         self,
     ) -> list[dict]:
-        live_capabilities = self._online_capabilities()
         return [
-            *self.registry.openai_schemas(
-                live_capabilities
-            ),
+            *self.registry.openai_schemas(),
             *CORE_TOOL_SCHEMAS,
             SOL_TOOL_SCHEMA,
         ]
@@ -1989,67 +1478,6 @@ class AgentCore:
             device_id
         ] = transport
 
-    def detach_transport(
-        self,
-        device_id: str,
-        transport: DeviceTransport | None = None,
-    ) -> bool:
-        """Detach only the expected live connection and mark it offline."""
-
-        current = self.transports.get(device_id)
-        if current is None or (
-            transport is not None
-            and current is not transport
-        ):
-            return False
-        if current is self.local_agent:
-            return False
-        self.transports.pop(device_id, None)
-        current.close()
-        device = self.devices.get(device_id)
-        if device is not None:
-            device.online = False
-        return True
-
-    def _record_tool_usage(
-        self,
-        *,
-        operation: str,
-        capability: str,
-        status: str,
-        latency_ms: int,
-        device_id: str,
-    ) -> None:
-        if self.usage_repository is None:
-            return
-        prefix = capability.split(".", 1)[0]
-        external_providers = {
-            "spotify",
-            "whatsapp",
-            "gmail",
-            "outlook",
-            "browser",
-            "codex",
-        }
-        provider = prefix if prefix in external_providers else "local-device"
-        try:
-            self.usage_repository.record_tool_call(
-                provider=provider,
-                operation=operation,
-                capability=capability,
-                status=status,
-                latency_ms=latency_ms,
-                api_requests=1 if provider in external_providers else 0,
-                estimated_cost=None,
-                currency=None,
-                device_id=device_id,
-            )
-        except Exception as exc:
-            self._log(
-                "tool_usage_write_failed",
-                error=type(exc).__name__,
-            )
-
     def close(
         self,
     ):
@@ -2062,9 +1490,6 @@ class AgentCore:
             transport.close()
 
         self.tasks.close()
-
-        if self.usage_repository is not None:
-            self.usage_repository.close()
 
     @staticmethod
     def _log(
@@ -2081,3 +1506,4 @@ class AgentCore:
                 default=str,
             )
         )
+
