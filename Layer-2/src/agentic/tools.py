@@ -125,7 +125,12 @@ def _open_app(arguments: dict) -> dict:
     if os.name != "nt":
         return {"ok": False, "error": "open_app is currently Windows-only"}
     os.startfile(executable)  # noqa: S606 - fixed allow-list, not model-supplied command.
-    return {"ok": True, "message": f"{app} launch requested"}
+    return {
+        "ok": True,
+        "status": "launch_requested",
+        "app_name": app,
+        "visible_window_verified": False,
+    }
 
 
 def _close_app(arguments: dict) -> dict:
@@ -150,7 +155,17 @@ def _close_app(arguments: dict) -> dict:
             requested.append(pid)
 
     win32gui.EnumWindows(request_close, None)
-    return {"ok": bool(requested), "message": f"{app}: normal window close requested; save dialog may remain", "pids": sorted(set(requested))}
+    return {
+        "ok": bool(requested),
+        "status": (
+            "close_requested"
+            if requested
+            else "no_visible_windows_found"
+        ),
+        "app_name": app,
+        "pids": sorted(set(requested)),
+        "save_dialog_may_remain": bool(requested),
+    }
 
 
 def _set_volume(arguments: dict) -> dict:
@@ -175,7 +190,17 @@ def _set_volume(arguments: dict) -> dict:
         return {"ok": False, "error": "pycaw is not installed; install requirements.txt"}
     except Exception as exc:
         return {"ok": False, "outcome": "unknown", "error": f"Unable to set volume: {type(exc).__name__}"}
-    return {"ok": abs(observed - level) <= 1, "message": "volume read back after setting", "level": observed}
+    verified = abs(observed - level) <= 1
+    return {
+        "ok": verified,
+        "status": (
+            "volume_verified"
+            if verified
+            else "volume_mismatch"
+        ),
+        "requested_level": level,
+        "level": observed,
+    }
 
 
 def _media_play_pause(arguments: dict) -> dict:
@@ -185,7 +210,12 @@ def _media_play_pause(arguments: dict) -> dict:
     import win32con
     win32api.keybd_event(win32con.VK_MEDIA_PLAY_PAUSE, 0, 0, 0)
     win32api.keybd_event(win32con.VK_MEDIA_PLAY_PAUSE, 0, win32con.KEYEVENTF_KEYUP, 0)
-    return {"ok": True, "message": "Windows global media toggle sent", "target_app": "unknown", "playback_state": "unverified"}
+    return {
+        "ok": True,
+        "status": "media_toggle_sent",
+        "target_app": None,
+        "playback_state_verified": False,
+    }
 
 
 def _system_info(arguments: dict) -> dict:
@@ -214,8 +244,13 @@ def _media_skip(direction: str) -> dict:
     key = win32con.VK_MEDIA_NEXT_TRACK if direction == "next" else win32con.VK_MEDIA_PREV_TRACK
     win32api.keybd_event(key, 0, 0, 0)
     win32api.keybd_event(key, 0, win32con.KEYEVENTF_KEYUP, 0)
-    return {"ok": True, "message": f"Windows global media {direction} signal sent",
-            "target_app": "unknown", "playback_state": "unverified"}
+    return {
+        "ok": True,
+        "status": "media_signal_sent",
+        "direction": direction,
+        "target_app": None,
+        "playback_state_verified": False,
+    }
 
 
 def _open_url(arguments: dict) -> dict:
@@ -230,7 +265,11 @@ def _open_url(arguments: dict) -> dict:
     if not valid:
         return {"ok": False, "error": "Only HTTPS URLs without credentials, whitespace or custom ports are supported"}
     os.startfile(url)
-    return {"ok": True, "message": "Browser navigation requested; page loading is unverified"}
+    return {
+        "ok": True,
+        "status": "navigation_requested",
+        "page_load_verified": False,
+    }
 
 
 def build_local_registry() -> ToolRegistry:

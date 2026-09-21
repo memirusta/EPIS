@@ -40,10 +40,19 @@ class MediaController:
             query = arguments.get("app_name", "").casefold()
             self.snapshot = {uuid.uuid4().hex: (s, time.monotonic() + 120)
                              for s in sessions[:32] if query in s.source_app_user_model_id.casefold()}
-            return {"ok": True, "sessions": [
-                {"session_id": token, "app_id": s.source_app_user_model_id,
-                 "playback_state": self.backend.state(s)} for token, (s, _) in self.snapshot.items()],
-                "message": "Only Windows-exposed media sessions; no track titles collected. Selection expires in 120 seconds."}
+            return {
+                "ok": True,
+                "sessions": [
+                    {
+                        "session_id": token,
+                        "app_id": s.source_app_user_model_id,
+                        "playback_state": self.backend.state(s),
+                    }
+                    for token, (s, _) in self.snapshot.items()
+                ],
+                "selection_ttl_seconds": 120,
+                "track_titles_collected": False,
+            }
         saved = self.snapshot.get(arguments["session_id"])
         if not saved or saved[1] < time.monotonic():
             return {"ok": False, "error": "Media selection expired; list sessions again"}
@@ -57,7 +66,12 @@ class MediaController:
         action = arguments["action"]
         expected = {"play": "playing", "pause": "paused"}.get(action)
         if expected and self.backend.state(session) == expected:
-            return {"ok": True, "playback_state": expected, "message": "Already in requested state; no command sent"}
+            return {
+                "ok": True,
+                "status": "already_in_requested_state",
+                "playback_state": expected,
+                "command_sent": False,
+            }
         accepted = await self.backend.command(session, action)
         if not accepted:
             return {"ok": False, "error": "Application rejected or does not support this media command"}
@@ -69,9 +83,17 @@ class MediaController:
                 await asyncio.sleep(0.1)
                 observed = self.backend.state(session)
         verified = expected is not None and observed == expected
-        return {"ok": True, "accepted": True, "state_verified": verified,
-                "playback_state": observed,
-                "message": "Requested state verified" if verified else "Command accepted; requested result not verified. Do not claim track/state changed."}
+        return {
+            "ok": True,
+            "status": (
+                "state_verified"
+                if verified
+                else "command_accepted_unverified"
+            ),
+            "command_accepted": True,
+            "state_verified": verified,
+            "playback_state": observed,
+        }
 
 
 def spotify_search(arguments):
@@ -79,7 +101,12 @@ def spotify_search(arguments):
     if not query or any(ord(c) < 32 for c in query):
         return {"ok": False, "error": "Search text must be non-empty and have no control characters"}
     os.startfile("https://open.spotify.com/search/" + quote(query, safe=""))
-    return {"ok": True, "message": "Spotify web search requested in browser; no track selected or playback started"}
+    return {
+        "ok": True,
+        "status": "search_opened_in_browser",
+        "track_selected": False,
+        "playback_started": False,
+    }
 
 
 def register_media_tools(registry):

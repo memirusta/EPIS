@@ -385,11 +385,13 @@ class AppCatalog:
                 for entry in matches[:50]
             ],
             "truncated": len(matches) > 50,
-            "limitations": (
-                "Windows Start Apps, Registry App Paths and argument-free "
-                "Start Menu EXEs are indexed. Filesystem paths and raw "
-                "Windows AppIDs are never returned."
-            ),
+            "sources": [
+                "windows_start_apps",
+                "registry_app_paths",
+                "argument_free_start_menu_exes",
+            ],
+            "filesystem_paths_returned": False,
+            "raw_windows_app_ids_returned": False,
         }
 
     def launch(self, arguments):
@@ -432,11 +434,11 @@ class AppCatalog:
             os.startfile(entry.path)
 
         return {
-            "ok": True,
-            "message": (
-                f"{entry.name} launch requested; visible window not yet verified"
-            ),
-        }
+    "ok": True,
+    "status": "launch_requested",
+    "app_name": entry.name,
+    "visible_window_verified": False,
+}
 
 
 class Win32Windows:
@@ -478,7 +480,8 @@ class Win32Windows:
             win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
             return {
                 "ok": True,
-                "message": "Normal window close requested; save dialog may remain",
+                "status": "close_requested",
+                "save_dialog_may_remain": True,
             }
 
         if action == "focus":
@@ -506,15 +509,14 @@ class Win32Windows:
 
         return {
             "ok": observed,
-            "action": action,
-            "message": (
-                "Window state verified"
+            "status": (
+                "window_state_verified"
                 if observed
-                else (
-                    "Windows did not confirm the requested state; "
-                    "no focus restrictions bypassed"
-                )
+                else "window_state_unverified"
             ),
+            "action": action,
+            "state_verified": observed,
+            "focus_restrictions_bypassed": False,
         }
 
 
@@ -549,10 +551,9 @@ class WindowController:
                 for token, (row, _) in self.snapshot.items()
             ],
             "truncated": len(rows) > 64,
-            "message": (
-                "No window titles/content collected. Tokens expire in 120 "
-                "seconds; do not guess between multiple windows."
-            ),
+            "selection_ttl_seconds": 120,
+            "window_titles_collected": False,
+            "window_content_collected": False,
         }
 
     def act(self, arguments, action):

@@ -439,6 +439,13 @@ class AgentCore:
             self.system_prompt
             + "\n\n# AGENT SINIRI\n"
             + (
+                "Tool result status/error alanlari makine gercekleridir; "
+                "bunlari kullaniciya ham metin gibi tekrar etme. "
+                "Sonucu EPIS'in dogal sesiyle sentezle. "
+                "Bir sonuc verified=False veya benzeri bir alan tasiyorsa "
+                "dogrulanmamis bir durumu dogrulanmis gibi soyleme. "
+            )
+            + (
                 "Tool sonucu gÃ¶rmeden iÅŸlem yapÄ±lmÄ±ÅŸ gibi konuÅŸma. "
                 "Tool Ã§aÄŸrÄ±larÄ± yalnÄ±zca Ã¶neridir; Core izin ve cihaz "
                 "kontrolÃ¼nden geÃ§irir. Tool sonucu geldikten sonra "
@@ -922,7 +929,7 @@ class AgentCore:
 
         while (
             calls
-            or model_steps < 32
+            or model_steps < 4
         ):
             if not calls:
                 try:
@@ -1031,7 +1038,7 @@ class AgentCore:
                     continue
 
                 if (
-                    model_steps >= 32
+                    model_steps >= 4
                     or len(results) >= 64
                 ):
                     result = {

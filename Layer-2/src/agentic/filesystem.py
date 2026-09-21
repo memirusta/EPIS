@@ -280,11 +280,12 @@ class FolderTools:
             "path": str(target),
             "entries": items,
             "truncated": truncated,
-            "message": (
-                "One directory listed; no file contents read. "
-                "Hidden/system/reparse entries and large dependency "
-                "directories are omitted."
-            ),
+            "scope": "single_directory",
+            "file_contents_read": False,
+            "hidden_entries_included": False,
+            "system_entries_included": False,
+            "reparse_entries_included": False,
+            "dependency_directories_included": False,
         }
 
     def open(self, args):
@@ -298,11 +299,9 @@ class FolderTools:
 
         return {
             "ok": True,
+            "status": "open_requested",
             "path": str(target),
-            "message": (
-                "Folder opening requested; "
-                "visible Explorer window unverified"
-            ),
+            "visible_window_verified": False,
         }
 
     def create(self, args):
@@ -341,9 +340,7 @@ class FolderTools:
 
         return {
             "ok": True,
-            "message": (
-                "New folder created in EPIS workspace"
-            ),
+            "status": "folder_created",
             "name": names[0],
             "path": str(target),
         }

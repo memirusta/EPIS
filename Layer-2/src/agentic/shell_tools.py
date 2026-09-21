@@ -159,8 +159,18 @@ class ShellTools:
             self.outputs.pop(next(iter(self.outputs)))
         output_id = uuid.uuid4().hex
         self.outputs[output_id] = (time.time() + 120, output[:MAX_OUTPUT])
-        return {**result, "output_id": output_id, "output_shared": False,
-                "message": "Output retained locally for 120 seconds. Separate approval required to send it to model. Job-contained children terminated; OS-brokered tasks are not contained and side effects are not rolled back."}
+        return {
+            **result,
+            "status": "command_finished",
+            "output_id": output_id,
+            "output_retained_local": True,
+            "output_ttl_seconds": 120,
+            "output_shared": False,
+            "output_share_requires_approval": True,
+            "job_children_terminated": True,
+            "os_brokered_tasks_contained": False,
+            "side_effects_rolled_back": False,
+        }
 
     def read(self, args):
         item = self.outputs.get(args["output_id"])

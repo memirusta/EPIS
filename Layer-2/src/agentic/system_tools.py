@@ -27,7 +27,16 @@ def mute(args):
     wanted = args["state"] == "muted"
     endpoint.SetMute(int(wanted), None)
     observed = bool(endpoint.GetMute())
-    return {"ok": observed == wanted, "muted": observed, "message": "Mute state read back"}
+    verified = observed == wanted
+    return {
+        "ok": verified,
+        "status": (
+            "mute_state_verified"
+            if verified
+            else "mute_state_mismatch"
+        ),
+        "muted": observed,
+    }
 
 
 def disk_status(args):
@@ -40,13 +49,27 @@ def disk_status(args):
 
 def open_settings(args):
     os.startfile(SETTINGS[args["page"]])
-    return {"ok": True, "message": "Windows settings page requested; no setting changed"}
+    return {
+        "ok": True,
+        "status": "settings_page_open_requested",
+        "page": args["page"],
+        "setting_changed": False,
+    }
 
 
 def lock_screen(args):
     import ctypes
     success = bool(ctypes.windll.user32.LockWorkStation())
-    return {"ok": success, "message": "Lock request accepted; lock state not independently verified" if success else "Windows rejected lock request"}
+    return {
+        "ok": success,
+        "status": (
+            "lock_requested"
+            if success
+            else "lock_request_rejected"
+        ),
+        "request_accepted": success,
+        "lock_state_verified": False,
+    }
 
 
 def brightness(args):
@@ -79,7 +102,23 @@ def brightness(args):
                 return {"ok": False, "outcome": "unknown", "error": "Display changed during verification"}
             monitor = monitors[0]
         level = int(monitor.CurrentBrightness)
-        return {"ok": "level" not in args or level == args["level"], "level": level, "message": "Brightness read from Windows"}
+        verified = "level" not in args or level == args["level"]
+        payload = {
+            "ok": verified,
+            "status": (
+                "brightness_read"
+                if "level" not in args
+                else (
+                    "brightness_verified"
+                    if verified
+                    else "brightness_mismatch"
+                )
+            ),
+            "level": level,
+        }
+        if "level" in args:
+            payload["requested_level"] = args["level"]
+        return payload
     finally:
         result = parameters = matching = method = monitor = methods = monitors = service = None
         pythoncom.CoUninitialize()
