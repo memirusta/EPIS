@@ -4,13 +4,14 @@ openai
 python-dotenv
 schedule
 psutil
-pywin32
+pywin32; sys_platform == 'win32'
 fastapi
 uvicorn[standard]
+websockets>=13,<17
 requests
 cryptography>=42
-uiautomation
-pycaw
+uiautomation; sys_platform == 'win32'
+pycaw; sys_platform == 'win32'
 winrt-Windows.Media.Control==3.2.1; sys_platform == 'win32'
 winrt-Windows.Foundation==3.2.1; sys_platform == 'win32'
 winrt-Windows.Foundation.Collections==3.2.1; sys_platform == 'win32'

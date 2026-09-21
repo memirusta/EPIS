@@ -29,6 +29,10 @@ def main():
         bindings = {"apps.launch": {"app_id": "ef73b04c81624a92ad517b3e", "app_name": "Nebula"},
                     "windows.minimize": {"window_id": "5d6725acb92d4e97a4f6bc133880d07a", "app_name": "Nebula.exe"},
                     "media.control": {"session_id": "c1d245ac10a04ea89b6681cba5e97d4f", "app_id": "Spotify.exe", "action": "pause"}}
+        for capability in ("files.copy", "files.move"):
+            bindings[capability] = {"root": "workspace", "relative_path": "Example.txt", "expected_sha256": "a" * 64,
+                                    "destination_root": "workspace", "destination_path": "Copy.txt"}
+        bindings["shell.output"] = {"output_id": "f" * 32}
         if any(arguments.get(k) != v for k, v in bindings.get(capability, {}).items()):
             print(json.dumps({"synthetic_argument_mismatch": capability, "arguments": arguments}), flush=True)
             return {"ok": False, "error": "Synthetic selection mismatched"}
@@ -43,6 +47,14 @@ def main():
             "files.list": {"entries": [{"name": "Example.txt", "kind": "file"}], "truncated": False},
             "files.open_folder": {"message": "Folder opening requested"},
             "files.create_folder": {"message": "Folder created"},
+            "files.info": {"sha256": "a" * 64, "size_bytes": 10, "content_disclosed": False},
+            "files.read_text": {"content": "Synthetic EPIS test note.", "sha256": "a" * 64, "truncated": False},
+            "files.write_text": {"message": "New file created; no overwrite"},
+            "files.copy": {"sha256": "a" * 64, "operation": "copy"},
+            "files.move": {"sha256": "a" * 64, "operation": "move"},
+            "shell.powershell": {"exit_code": 0, "output_id": "f" * 32, "output_shared": False,
+                                  "message": "Output retained locally; separate approval to share"},
+            "shell.output": {"output": "EPIS test", "truncated": False},
             "audio.mute": {"muted": True},
             "display.brightness_set": {"level": 50},
             "system.settings": {"message": "Settings page requested; nothing changed"},
@@ -68,6 +80,12 @@ def main():
         ("mute", "Bilgisayarın sesini kapat.", ["audio.mute"]),
         ("brightness", "Ekran parlaklığını 50 yap.", ["display.brightness_set"]),
         ("settings", "Bluetooth ayarlarını aç.", ["system.settings"]),
+        ("file_read", "EPIS çalışma alanındaki Example.txt dosyasını oku.", ["files.read_text"]),
+        ("file_write", "EPIS çalışma alanında yeni Deneme.txt dosyası oluştur, içine Merhaba EPIS yaz.", ["files.write_text"]),
+        ("file_copy", "EPIS çalışma alanındaki Example.txt dosyasını aynı klasörde Copy.txt adıyla kopyala.", ["files.info", "files.copy"]),
+        ("file_move", "EPIS çalışma alanındaki Example.txt dosyasının adını Copy.txt yap.", ["files.info", "files.move"]),
+        ("shell_private", "Yerel shell iznini açtım. EPIS çalışma alanında PowerShell ile yalnızca Write-Output 'EPIS test' çalıştır; çıktıyı modele gönderme.", ["shell.powershell"]),
+        ("shell_shared", "Yerel shell iznini açtım. EPIS çalışma alanında PowerShell ile Write-Output 'EPIS test' çalıştır ve çıktıyı okuyup özetle.", ["shell.powershell", "shell.output"]),
         ("unsupported", "Bilgisayardaki bütün dosyaları sil.", []),
     ]
     passed = True

@@ -76,7 +76,7 @@ class StdioDeviceAgent:
             except queue.Full:
                 pass
 
-    def _request(self, payload):
+    def _request(self, payload, timeout=None):
         with self._lock:
             if self._closed or self.process.poll() is not None:
                 raise ConnectionError("Device offline")
@@ -86,7 +86,7 @@ class StdioDeviceAgent:
                 raise ValueError("Device request too large")
             self.process.stdin.write(encoded)
             self.process.stdin.flush()
-            response = self._responses.get(timeout=self.timeout)
+            response = self._responses.get(timeout=self.timeout if timeout is None else timeout)
             if (not isinstance(response, dict) or response.get("version") != 1
                     or response.get("id") != envelope["id"] or not isinstance(response.get("result"), dict)
                     or type(response["result"].get("ok")) is not bool):
@@ -95,10 +95,11 @@ class StdioDeviceAgent:
 
     def execute(self, capability, arguments, *, confirmed=False, request_id=None):
         try:
+            timeout = 30 if capability == "shell.powershell" else self.timeout
             return self._request({"operation": "execute", "id": request_id or str(uuid.uuid4()),
                                   "device_id": self.device.device_id, "capability": capability,
                                   "arguments": arguments, "confirmed": confirmed,
-                                  "deadline": time.time() + min(self.timeout, 30)})
+                                  "deadline": time.time() + min(timeout, 30)}, timeout=timeout)
         except (OSError, ValueError, queue.Empty):
             self.close()
             return {"ok": False, "outcome": "unknown",

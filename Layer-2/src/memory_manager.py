@@ -21,8 +21,14 @@ class MemoryManager:
         self.layer2_dir   = os.path.dirname(self.current_dir)
         self.epis_root    = os.path.dirname(self.layer2_dir)
 
-        self.identity_dir = os.path.join(self.epis_root, "Layer-1", "identity")
-        self.memory_dir   = os.path.join(self.epis_root, "Layer-1", "memory")
+        self.identity_dir = os.path.abspath(
+            os.getenv("EPIS_IDENTITY_DIR")
+            or os.path.join(self.epis_root, "Layer-1", "identity")
+        )
+        self.memory_dir   = os.path.abspath(
+            os.getenv("EPIS_MEMORY_DIR")
+            or os.path.join(self.epis_root, "Layer-1", "memory")
+        )
         self.db_path      = os.path.join(self.memory_dir, "lifetime.db")
         self.people_path  = os.path.join(self.memory_dir, "people.json")
 

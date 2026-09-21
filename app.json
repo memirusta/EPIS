@@ -1,0 +1,56 @@
+{
+  "name": "EPIS Server",
+  "description": "Authenticated FastAPI and WebSocket backend for EPIS.",
+  "repository": "https://github.com/memirusta/EPIS",
+  "keywords": ["python", "fastapi", "websocket", "epis"],
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ],
+  "env": {
+    "OPENAI_API_KEY": {
+      "description": "OpenAI project API key used by Luna and Sol."
+    },
+    "OPENAI_ADMIN_KEY": {
+      "description": "Optional OpenAI organization admin key for the Usage screen.",
+      "required": false
+    },
+    "EPIS_SERVER_TOKEN": {
+      "description": "Private WebSocket authentication token.",
+      "generator": "secret"
+    },
+    "EPIS_DEPLOYMENT": {
+      "value": "cloud"
+    },
+    "EPIS_DEVICE_TRANSPORT": {
+      "value": "inprocess"
+    },
+    "EPIS_LUNA_CONTEXT_MODE": {
+      "value": "minimal"
+    },
+    "EPIS_MEMORY_DIR": {
+      "value": "/tmp/epis-memory"
+    },
+    "EPIS_KEY_PATH": {
+      "value": "/tmp/epis-memory/epis.key"
+    },
+    "EPIS_USAGE_TIMEZONE": {
+      "value": "Europe/Istanbul"
+    },
+    "ENCRYPTION_ENABLED": {
+      "value": "false"
+    },
+    "THINKING_LOG": {
+      "value": "false"
+    },
+    "WEB_CONCURRENCY": {
+      "value": "1"
+    }
+  },
+  "formation": {
+    "web": {
+      "quantity": 1
+    }
+  }
+}

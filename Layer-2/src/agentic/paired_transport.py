@@ -79,7 +79,7 @@ class PairedTransport:
             self.close()
             raise
 
-    def _request(self, payload):
+    def _request(self, payload, timeout=None):
         with self._lock:
             grant = self.grants.get(self.fingerprint)
             if (self._stop.is_set() or not grant
@@ -87,8 +87,12 @@ class PairedTransport:
                     or (self.device and self.device.device_id != grant["device_id"])):
                 raise PermissionError("Device grant unavailable")
             request = {"version": 1, "id": str(uuid.uuid4()), **payload}
-            self.frame.send(request)
-            response = self.frame.receive()
+            self.connection.settimeout(self.timeout if timeout is None else timeout)
+            try:
+                self.frame.send(request)
+                response = self.frame.receive()
+            finally:
+                self.connection.settimeout(self.timeout)
             if (response.get("version") != 1 or response.get("id") != request["id"]
                     or not isinstance(response.get("result"), dict)
                     or type(response["result"].get("ok")) is not bool):
@@ -119,10 +123,11 @@ class PairedTransport:
             grant = self.grants.get(self.fingerprint)
             if not grant or capability not in grant["capabilities"] or capability not in self.device.capabilities:
                 return {"ok": False, "error": "Capability not granted or device revoked"}
+            timeout = 30 if capability == "shell.powershell" else self.timeout
             return self._request({"operation": "execute", "id": request_id or str(uuid.uuid4()),
                                   "device_id": self.device.device_id, "capability": capability,
                                   "arguments": arguments, "confirmed": confirmed,
-                                  "deadline": time.time() + min(self.timeout, 30)})
+                                  "deadline": time.time() + min(timeout, 30)}, timeout=timeout)
         except (OSError, ValueError, KeyError, sqlite3.Error):
             self.close()
             return {"ok": False, "outcome": "unknown", "error": "Paired device connection lost; do not retry automatically"}

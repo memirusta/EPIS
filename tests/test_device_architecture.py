@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Layer-2" / "src"))
-from agentic.devices import Device, DeviceRegistry, LocalDeviceAgent
+from agentic.devices import Device, DeviceRegistry, LocalDeviceAgent, UnavailableDeviceAgent
 from agentic.device_worker import DeviceWorker
 from agentic.luna import LunaReply, ToolCall
 from agentic.tasks import TaskStore
@@ -166,6 +166,33 @@ class DeviceArchitectureTests(unittest.TestCase):
         self.assertEqual(result.tool_results[0]["from"], "second")
         second.dispatcher.assert_called_once()
 
+    def test_cloud_placeholder_routes_default_call_to_connected_device_and_records_usage(self):
+        core = build_core([])
+        core.local_agent.close()
+        placeholder = UnavailableDeviceAgent(core.devices)
+        core.local_agent = placeholder
+        core.transports = {placeholder.device.device_id: placeholder}
+        core.usage_repository = Mock()
+        self.addCleanup(core.close)
+
+        with patch.dict(os.environ, {"EPIS_DEVICE_ID": "legion-cloud"}):
+            remote = LocalDeviceAgent(
+                core.devices,
+                Mock(return_value={"ok": True, "from": "cloud-device"}),
+                {"system.info"},
+            )
+        core.attach_transport(remote)
+
+        result = core._dispatch(ToolCall("cloud-1", "get_system_info", {}), False)
+
+        self.assertEqual(result.tool_results[0]["from"], "cloud-device")
+        remote.dispatcher.assert_called_once()
+        core.usage_repository.record_tool_call.assert_called_once()
+        event = core.usage_repository.record_tool_call.call_args.kwargs
+        self.assertEqual(event["provider"], "local-device")
+        self.assertEqual(event["device_id"], "legion-cloud")
+        self.assertIsNone(event["estimated_cost"])
+
     def test_core_device_and_task_tools_are_read_only(self):
         core = build_core([])
         self.addCleanup(core.close)
@@ -187,7 +214,7 @@ class DeviceArchitectureTests(unittest.TestCase):
 
     def test_new_registry_metadata(self):
         registry = build_local_registry()
-        self.assertEqual(len(registry.specs()), 30)
+        self.assertEqual(len(registry.specs()), 37)
         self.assertEqual(registry.get("open_url")[0].risk_class, "yellow")
         self.assertIn("system.battery", registry.capabilities("windows"))
         self.assertEqual(registry.capabilities("linux"), set())

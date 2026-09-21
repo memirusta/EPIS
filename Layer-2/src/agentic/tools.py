@@ -258,4 +258,8 @@ def build_local_registry() -> ToolRegistry:
     register_media_tools(registry)
     register_folder_tools(registry)
     register_system_tools(registry)
+    from .file_tools import register_file_tools
+    from .shell_tools import register_shell_tools
+    register_file_tools(registry)
+    register_shell_tools(registry)
     return registry

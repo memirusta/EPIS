@@ -7,6 +7,9 @@ import json
 import os
 from typing import Protocol
 import logging
+from time import perf_counter
+
+from .usage import UsageRepository
 
 
 def display_text(text: str) -> str:
@@ -56,7 +59,13 @@ class LunaClient(Protocol):
 class OpenAILunaClient:
     """Direct GPT-5.6 Luna adapter using OpenAI Chat Completions."""
 
-    def __init__(self, model: str | None = None, base_url: str | None = None, api_key: str | None = None):
+    def __init__(
+        self,
+        model: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        usage_repository: UsageRepository | None = None,
+    ):
         self.model = model or os.getenv("LUNA_MODEL", "gpt-5.6-luna")
         self.base_url = (base_url or os.getenv("LUNA_BASE_URL") or "").rstrip("/") or None
         self.api_key = api_key or os.getenv("LUNA_API_KEY") or os.getenv("OPENAI_API_KEY")
@@ -65,6 +74,7 @@ class OpenAILunaClient:
         # delegated to Sol, so the no-reasoning default also matches EPIS's
         # cost and latency boundary for frontline turns.
         self.reasoning_effort = os.getenv("LUNA_REASONING_EFFORT", "none")
+        self.usage_repository = usage_repository
 
     def _client(self):
         try:
@@ -79,6 +89,7 @@ class OpenAILunaClient:
         return OpenAI(**kwargs)
 
     def complete(self, messages: list[dict], tools: list[dict]) -> LunaReply:
+        started = perf_counter()
         response = self._client().chat.completions.create(
             model=self.model,
             messages=messages,
@@ -88,6 +99,10 @@ class OpenAILunaClient:
             store=False,
             max_completion_tokens=2048,
             reasoning_effort=self.reasoning_effort,
+        )
+        self._record_usage(
+            getattr(response, "usage", None),
+            round((perf_counter() - started) * 1000),
         )
         message = response.choices[0].message
         calls = []
@@ -99,42 +114,263 @@ class OpenAILunaClient:
             calls.append(ToolCall(raw_call.id, raw_call.function.name, arguments))
         return LunaReply(text=display_text(message.content or ""), tool_calls=calls)
 
+    def _record_usage(self, usage, latency_ms: int) -> None:
+        if self.usage_repository is None:
+            return
+        try:
+            self.usage_repository.record_openai_response(
+                request_kind="luna",
+                model=self.model,
+                usage=usage,
+                latency_ms=latency_ms,
+            )
+        except Exception as exc:
+            logging.getLogger("EPIS.AGENT").warning(
+                "Luna usage recording failed: %s",
+                type(exc).__name__,
+            )
+
 
 class OpenAISolClient:
     """Direct GPT-5.6 Sol specialist; privacy filtering stays local."""
 
-    def __init__(self, privacy_filter, model: str | None = None, api_key: str | None = None):
+    def __init__(
+        self,
+        privacy_filter,
+        model: str | None = None,
+        api_key: str | None = None,
+        usage_repository: UsageRepository | None = None,
+    ):
         self.privacy = privacy_filter
         self.model = model or os.getenv("SOL_MODEL", "gpt-5.6-sol")
         self.api_key = api_key or os.getenv("SOL_API_KEY") or os.getenv("OPENAI_API_KEY")
         self.reasoning_effort = os.getenv("SOL_REASONING_EFFORT", "high")
+        self.usage_repository = usage_repository
 
     def analyze(self, task: str, context: dict | None = None) -> dict:
         try:
             from openai import OpenAI
         except ImportError as exc:
-            return {"ok": False, "error": f"openai package is required for Sol: {exc}"}
+            return {
+                "ok": False,
+                "error": f"openai package is required for Sol: {exc}",
+            }
+
         safe_task, mapping = self.privacy.anonymize(task)
         reason = (context or {}).get("reason", "analysis")
+
         try:
-            client = OpenAI(api_key=self.api_key, timeout=180.0, max_retries=1)
+            max_output_tokens = int(
+                os.getenv(
+                    "SOL_MAX_OUTPUT_TOKENS",
+                    "16384",
+                )
+            )
+
+            client = OpenAI(
+                api_key=self.api_key,
+                timeout=180.0,
+                max_retries=1,
+            )
+
+            started = perf_counter()
             response = client.responses.create(
                 model=self.model,
-                reasoning={"effort": self.reasoning_effort},
+                reasoning={
+                    "effort": self.reasoning_effort,
+                },
                 store=False,
-                max_output_tokens=4096,
+                max_output_tokens=max_output_tokens,
                 instructions=(
-                    "You are Sol, EPIS's specialist analysis engine. Work on the delegated "
-                    "task only. Return a concise, rigorous result for Luna to synthesize; do "
-                    "not imitate EPIS's personality and do not claim tool actions you did not perform."
+                    "You are Sol, EPIS's specialist analysis engine. "
+                    "Work on the delegated task only. Return a concise, "
+                    "rigorous result for Luna to synthesize; do not imitate "
+                    "EPIS's personality and do not claim tool actions you "
+                    "did not perform."
                 ),
-                input=f"Delegation type: {reason}\n\nTask:\n{safe_task}",
+                input=(
+                    f"Delegation type: {reason}\n\n"
+                    f"Task:\n{safe_task}"
+                ),
             )
-            text = self.privacy.deanonymize(response.output_text or "", mapping)
-            return {"ok": True, "model_used": self.model, "result": text}
+            self._record_usage(
+                getattr(response, "usage", None),
+                round((perf_counter() - started) * 1000),
+            )
+
+            status = getattr(
+                response,
+                "status",
+                None,
+            )
+
+            incomplete_details = getattr(
+                response,
+                "incomplete_details",
+                None,
+            )
+
+            incomplete_reason = None
+
+            if incomplete_details is not None:
+                incomplete_reason = getattr(
+                    incomplete_details,
+                    "reason",
+                    None,
+                )
+
+                if incomplete_reason is None:
+                    incomplete_reason = str(
+                        incomplete_details
+                    )
+
+            usage = getattr(
+                response,
+                "usage",
+                None,
+            )
+
+            output_tokens = (
+                getattr(
+                    usage,
+                    "output_tokens",
+                    None,
+                )
+                if usage is not None
+                else None
+            )
+
+            output_details = (
+                getattr(
+                    usage,
+                    "output_tokens_details",
+                    None,
+                )
+                if usage is not None
+                else None
+            )
+
+            reasoning_tokens = (
+                getattr(
+                    output_details,
+                    "reasoning_tokens",
+                    None,
+                )
+                if output_details is not None
+                else None
+            )
+
+            raw_text = (
+                getattr(
+                    response,
+                    "output_text",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            result_text = self.privacy.deanonymize(
+                raw_text,
+                mapping,
+            )
+
+            diagnostics = {
+                "response_status": status,
+                "incomplete_reason": incomplete_reason,
+                "output_tokens": output_tokens,
+                "reasoning_tokens": reasoning_tokens,
+                "max_output_tokens": max_output_tokens,
+            }
+
+            if status not in {
+                None,
+                "completed",
+            }:
+                logging.getLogger(
+                    "EPIS.AGENT"
+                ).warning(
+                    (
+                        "Sol response not completed: "
+                        "status=%s reason=%s "
+                        "output_tokens=%s reasoning_tokens=%s"
+                    ),
+                    status,
+                    incomplete_reason,
+                    output_tokens,
+                    reasoning_tokens,
+                )
+
+                result = {
+                    "ok": False,
+                    "model_used": self.model,
+                    "error": "Sol response incomplete",
+                    **diagnostics,
+                }
+
+                if result_text:
+                    result["partial_result"] = result_text
+
+                return result
+
+            if not result_text:
+                logging.getLogger(
+                    "EPIS.AGENT"
+                ).warning(
+                    (
+                        "Sol returned empty output_text: "
+                        "status=%s output_tokens=%s "
+                        "reasoning_tokens=%s max_output_tokens=%s"
+                    ),
+                    status,
+                    output_tokens,
+                    reasoning_tokens,
+                    max_output_tokens,
+                )
+
+                return {
+                    "ok": False,
+                    "model_used": self.model,
+                    "error": "Sol returned empty output_text",
+                    **diagnostics,
+                }
+
+            return {
+                "ok": True,
+                "model_used": self.model,
+                "result": result_text,
+                **diagnostics,
+            }
+
         except Exception as exc:
-            logging.getLogger("EPIS.AGENT").warning("Sol request failed: %s", type(exc).__name__)
-            return {"ok": False, "model_used": self.model, "error": type(exc).__name__}
+            logging.getLogger(
+                "EPIS.AGENT"
+            ).warning(
+                "Sol request failed: %s",
+                type(exc).__name__,
+            )
+
+            return {
+                "ok": False,
+                "model_used": self.model,
+                "error": type(exc).__name__,
+            }
+
+    def _record_usage(self, usage, latency_ms: int) -> None:
+        if self.usage_repository is None:
+            return
+        try:
+            self.usage_repository.record_openai_response(
+                request_kind="sol",
+                model=self.model,
+                usage=usage,
+                latency_ms=latency_ms,
+            )
+        except Exception as exc:
+            logging.getLogger("EPIS.AGENT").warning(
+                "Sol usage recording failed: %s",
+                type(exc).__name__,
+            )
+
 
 
 # Compatibility for imports from the first 0.1 implementation.

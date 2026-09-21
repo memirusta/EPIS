@@ -107,3 +107,29 @@ class LocalDeviceAgent:
 
     def refresh(self):
         return self.device.online
+
+
+class UnavailableDeviceAgent:
+    """Cloud control-plane placeholder; it never executes OS capabilities."""
+
+    def __init__(self, registry: DeviceRegistry):
+        self.registry = registry
+        self.device = registry.register(Device(
+            device_id="cloud-control-plane",
+            display_name="EPIS Cloud",
+            platform="cloud",
+            capabilities=set(),
+            online=False,
+        ))
+
+    def execute(self, capability: str, arguments: dict, *, confirmed=False, request_id=None) -> dict:
+        return {
+            "ok": False,
+            "error": "No connected device can execute this capability",
+        }
+
+    def close(self):
+        self.device.online = False
+
+    def refresh(self):
+        return False

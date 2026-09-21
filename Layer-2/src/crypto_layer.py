@@ -28,7 +28,12 @@ from dotenv import load_dotenv
 THIS_DIR  = os.path.dirname(os.path.abspath(__file__))
 EPIS_ROOT = os.path.normpath(os.path.join(THIS_DIR, "..", ".."))
 
-load_dotenv(dotenv_path=os.path.join(EPIS_ROOT, "Layer-3", "keys.env"))
+load_dotenv(
+    dotenv_path=(
+        os.getenv("EPIS_KEYS_FILE")
+        or os.path.join(EPIS_ROOT, "Layer-3", "keys.env")
+    )
+)
 
 logger = logging.getLogger("EPIS.CRYPTO")
 
