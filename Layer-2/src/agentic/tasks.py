@@ -25,7 +25,7 @@ class TaskStore:
                 self._lease.close()
                 self._lease = None
                 raise RuntimeError("Another EPIS session owns this action journal") from exc
-        self.db = sqlite3.connect(path)
+        self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("""CREATE TABLE IF NOT EXISTS actions (
             task_id TEXT PRIMARY KEY, tool TEXT NOT NULL, device TEXT NOT NULL,
