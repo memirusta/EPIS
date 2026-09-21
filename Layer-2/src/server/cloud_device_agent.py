@@ -71,6 +71,7 @@ async def run_once(url: str, token: str, worker: DeviceWorker) -> None:
             if message.get("type") != "device.execute":
                 continue
             command = {key: value for key, value in message.items() if key != "type"}
+            command["operation"] = "execute"
             request_id = command.get("id")
             try:
                 result = await asyncio.to_thread(worker.handle, command)
