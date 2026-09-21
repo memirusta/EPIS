@@ -106,6 +106,8 @@ type UsageSnapshot = {
   warning: string | null;
 };
 
+const CHAT_STORAGE_KEY = "epis.desktop.chat.v1";
+
 let messageId = 0;
 
 function nextMessageId() {
@@ -123,6 +125,63 @@ function asObject(value: unknown): ToolResult | null {
   }
 
   return null;
+}
+
+function loadStoredMessages(): Message[] {
+  try {
+    const raw = window.localStorage.getItem(CHAT_STORAGE_KEY);
+
+    if (!raw) {
+      return [];
+    }
+
+    const parsed: unknown = JSON.parse(raw);
+
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    const restored: Message[] = [];
+
+    for (const value of parsed) {
+      const item = asObject(value);
+
+      if (item === null) {
+        continue;
+      }
+
+      if (
+        item.role !== "user" &&
+        item.role !== "assistant"
+      ) {
+        continue;
+      }
+
+      if (typeof item.text !== "string") {
+        continue;
+      }
+
+      const toolResults = Array.isArray(item.toolResults)
+        ? item.toolResults
+            .map(asObject)
+            .filter(
+              (tool): tool is ToolResult =>
+                tool !== null,
+            )
+        : undefined;
+
+      restored.push({
+        id: nextMessageId(),
+        role: item.role,
+        text: item.text,
+        toolResults,
+      });
+    }
+
+    return restored;
+  } catch {
+    return [];
+  }
 }
 
 function toolTitle(tool: ToolResult): string {
@@ -285,7 +344,8 @@ export default function App() {
 
   const [serverVersion, setServerVersion] = useState("");
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] =
+    useState<Message[]>(loadStoredMessages);
   const [text, setText] = useState("");
   const [waiting, setWaiting] = useState(false);
   const [confirmationPending, setConfirmationPending] =
@@ -298,6 +358,25 @@ export default function App() {
   const [devicesError, setDevicesError] = useState<string | null>(null);
 
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        CHAT_STORAGE_KEY,
+        JSON.stringify(
+          messages.map(
+            ({ role, text, toolResults }) => ({
+              role,
+              text,
+              toolResults,
+            }),
+          ),
+        ),
+      );
+    } catch {
+      // UI persistence failure must not break chat.
+    }
+  }, [messages]);
 
   useEffect(() => {
     invoke<ServerConfig>("server_config")

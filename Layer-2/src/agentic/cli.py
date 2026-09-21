@@ -45,14 +45,10 @@ def create_core() -> AgentCore:
     # Son birkaç saatlik doğal user <-> EPIS konuşmasını restart'lar
     # arasında korur.
     # ------------------------------------------------------------------
-    hot_memory = (
-        None
-        if cloud_mode
-        else HotConversationStore(
-            os.path.join(
-                memory.memory_dir,
-                "agent_hot_conversation.jsonl",
-            )
+    hot_memory = HotConversationStore(
+        os.path.join(
+            memory.memory_dir,
+            "agent_hot_conversation.jsonl",
         )
     )
 
