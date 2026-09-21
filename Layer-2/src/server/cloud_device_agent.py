@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import random
 import sys
+import tempfile
 from urllib.parse import urlsplit, urlunsplit
 
 # Bundled direct entrypoint. Do not load dotenv or model credentials.
@@ -34,6 +35,43 @@ def _connect():
     except ImportError:
         from websockets import connect
     return connect
+
+
+def _acquire_single_instance():
+    """Keep one Windows device agent per user session."""
+    if os.name != "nt":
+        return object()
+
+    import msvcrt
+
+    base = Path(os.getenv("LOCALAPPDATA") or tempfile.gettempdir()) / "EPIS"
+    base.mkdir(parents=True, exist_ok=True)
+    handle = open(base / "device-agent.lock", "a+b")
+
+    try:
+        if handle.seek(0, os.SEEK_END) == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        handle.close()
+        return None
+
+    return handle
+
+
+def _release_single_instance(handle) -> None:
+    if handle is None or os.name != "nt":
+        return
+    try:
+        import msvcrt
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
+    finally:
+        handle.close()
 
 
 async def run_once(url: str, token: str, worker: DeviceWorker) -> None:
@@ -106,10 +144,17 @@ async def run_forever(url: str, token: str) -> None:
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO)
+
+    lease = _acquire_single_instance()
+    if lease is None:
+        logger.info("Another EPIS device agent is already running")
+        return 73
+
     url = os.getenv("EPIS_SERVER_URL", "").strip()
     token = os.getenv("EPIS_SERVER_TOKEN", "").strip()
     if not url or not token:
         logger.error("EPIS_SERVER_URL and EPIS_SERVER_TOKEN are required")
+        _release_single_instance(lease)
         return 2
     # Tool handlers and any subprocess they launch must never inherit the
     # control-plane credential. Reconnect state keeps only the in-memory copy.
@@ -119,6 +164,8 @@ def main() -> int:
         asyncio.run(run_forever(url, token))
     except KeyboardInterrupt:
         return 0
+    finally:
+        _release_single_instance(lease)
     return 0
 
 

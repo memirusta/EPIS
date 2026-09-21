@@ -202,6 +202,9 @@ impl LocalServer {
                             *self.child.lock().map_err(|_| "server lock poisoned")? = Some(child);
                             return Ok(());
                         }
+                        Ok(Some(status)) if status.code() == Some(73) => {
+                            return Ok(());
+                        }
                         Ok(Some(status)) => {
                             last_error = format!(
                                 "{} exited during device-agent startup with {}",

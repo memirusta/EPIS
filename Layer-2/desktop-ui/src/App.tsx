@@ -14,6 +14,7 @@ type Message = {
 };
 
 type ConnectionState = "connecting" | "online" | "offline";
+type AgentConnectionState = "connecting" | "online" | "offline";
 
 type ApprovalRequest = {
   id: string;
@@ -26,6 +27,11 @@ type ApprovalRequest = {
 type ServerConfig = {
   url: string;
   token: string;
+};
+
+type StartupState = {
+  supported: boolean;
+  enabled: boolean;
 };
 
 type DeviceSnapshot = {
@@ -308,16 +314,16 @@ function asDeviceSnapshots(value: unknown): DeviceSnapshot[] | null {
 function formatNumber(value: number | null | undefined): string {
   return typeof value === "number"
     ? new Intl.NumberFormat("tr-TR").format(value)
-    : "â€”";
+    : "—";
 }
 
 function formatLatency(value: number | null): string {
-  return typeof value === "number" ? `${(value / 1000).toFixed(1)}s` : "â€”";
+  return typeof value === "number" ? `${(value / 1000).toFixed(1)}s` : "—";
 }
 
 function formatCost(value: number | null, currency: string | null): string {
   if (value === null) {
-    return "â€”";
+    return "—";
   }
 
   return new Intl.NumberFormat("en-US", {
@@ -331,7 +337,7 @@ function formatCost(value: number | null, currency: string | null): string {
 function formatTimestamp(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime())
-    ? "â€”"
+    ? "—"
     : new Intl.DateTimeFormat("tr-TR", {
       hour: "2-digit",
       minute: "2-digit",
@@ -370,6 +376,8 @@ export default function App() {
   const [page, setPage] = useState<Page>("chat");
   const [connection, setConnection] =
     useState<ConnectionState>("connecting");
+  const [agentConnection, setAgentConnection] =
+    useState<AgentConnectionState>("connecting");
 
   const [serverVersion, setServerVersion] = useState("");
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
@@ -385,6 +393,9 @@ export default function App() {
   const [devices, setDevices] = useState<DeviceSnapshot[]>([]);
   const [devicesLoading, setDevicesLoading] = useState(false);
   const [devicesError, setDevicesError] = useState<string | null>(null);
+  const [startupState, setStartupState] = useState<StartupState | null>(null);
+  const [startupSaving, setStartupSaving] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
 
   const [error, setError] = useState<string | null>(null);
 
@@ -444,7 +455,9 @@ export default function App() {
         }
 
         setConnection("online");
+        setAgentConnection("connecting");
         setError(null);
+        ws.send(JSON.stringify({ type: "devices.get" }));
       };
 
       ws.onmessage = (event) => {
@@ -500,7 +513,7 @@ export default function App() {
             const snapshot = asUsageSnapshot(data.data);
 
             if (snapshot === null) {
-              setUsageError("Usage verisi okunamadÄ±.");
+              setUsageError("Usage verisi okunamadı.");
             } else {
               setUsage(snapshot);
               setUsageError(null);
@@ -513,10 +526,14 @@ export default function App() {
           if (data.type === "devices.snapshot") {
             const snapshot = asDeviceSnapshots(data.devices);
             if (snapshot === null) {
-              setDevicesError("Cihaz verisi okunamadÄ±.");
+              setDevicesError("Cihaz verisi okunamadı.");
             } else {
               setDevices(snapshot);
               setDevicesError(null);
+              const windowsOnline = snapshot.some(
+                (device) => device.online && device.platform.toLowerCase() === "windows",
+              );
+              setAgentConnection(windowsOnline ? "online" : "offline");
             }
             setDevicesLoading(false);
             return;
@@ -564,6 +581,7 @@ export default function App() {
 
         socketRef.current = null;
         setConnection("offline");
+        setAgentConnection("offline");
         setWaiting(false);
 
         reconnectTimerRef.current = window.setTimeout(
@@ -615,6 +633,25 @@ export default function App() {
     setDevicesError(null);
     ws.send(JSON.stringify({ type: "devices.get" }));
   }, [page, connection]);
+
+  useEffect(() => {
+    if (connection !== "online") return;
+    const timer = window.setInterval(() => {
+      const ws = socketRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "devices.get" }));
+      }
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [connection]);
+
+  useEffect(() => {
+    if (page !== "settings") return;
+    setSettingsError(null);
+    invoke<StartupState>("startup_state")
+      .then(setStartupState)
+      .catch(() => setSettingsError("Windows başlangıç ayarı okunamadı."));
+  }, [page]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({
@@ -718,6 +755,20 @@ export default function App() {
     setError(null);
   }
 
+  async function toggleStartup(enabled: boolean) {
+    if (startupSaving) return;
+    setStartupSaving(true);
+    setSettingsError(null);
+    try {
+      const state = await invoke<StartupState>("set_startup_enabled", { enabled });
+      setStartupState(state);
+    } catch {
+      setSettingsError("Windows başlangıç ayarı değiştirilemedi.");
+    } finally {
+      setStartupSaving(false);
+    }
+  }
+
   function clearContext() {
     if (waiting) {
       return;
@@ -794,6 +845,15 @@ export default function App() {
             <span className="divider" />
             <span className="dot dim" />
             Sol
+          </div>
+
+          <div className={`agent-pill ${agentConnection}`}>
+            <span className="dot" />
+            {agentConnection === "online"
+              ? "PC Agent"
+              : agentConnection === "connecting"
+                ? "Agent bağlanıyor"
+                : "Agent offline"}
           </div>
 
           <div className={`server-pill ${connection}`}>
@@ -1010,14 +1070,14 @@ export default function App() {
       ) : page === "usage" ? (
         <main className="panel-page">
           <section className="panel usage-panel">
-            <div className="panel-kicker">USAGE Â· TODAY</div>
+            <div className="panel-kicker">USAGE · TODAY</div>
             <h1>API Usage</h1>
             <p>
               Toplamlar OpenAI Organization Usage ve Costs API'lerinden gelir.
-              Prompt ve yanÄ±t metni kaydedilmez.
+              Prompt ve yanıt metni kaydedilmez.
             </p>
 
-            {usageLoading && <div className="usage-state">YÃ¼kleniyor...</div>}
+            {usageLoading && <div className="usage-state">Yükleniyor...</div>}
 
             {usageError && <div className="usage-state error-state">{usageError}</div>}
 
@@ -1028,7 +1088,7 @@ export default function App() {
             {!usageLoading && !usageError && usage && usage.totals.requests === 0 &&
               (usage.tool_usage?.totals.calls ?? 0) === 0 && (
               <div className="usage-state">
-                Bu zaman aralÄ±ÄŸÄ±nda kaydedilmiÅŸ model veya araÃ§ Ã§aÄŸrÄ±sÄ± yok.
+                Bu zaman aralığında kaydedilmiş model veya araç çağrısı yok.
               </div>
             )}
 
@@ -1052,7 +1112,7 @@ export default function App() {
                     <span>Cache hit</span>
                     <strong>
                       {usage.totals.cache_hit_percent === null
-                        ? "â€”"
+                        ? "—"
                         : `%${usage.totals.cache_hit_percent}`}
                     </strong>
                   </div>
@@ -1088,14 +1148,14 @@ export default function App() {
                     <h2>Last 24h token graph</h2>
                     <span>{usage.hourly.length} hourly buckets</span>
                   </div>
-                  <div className="usage-chart" aria-label="Son 24 saatte kullanÄ±lan token miktarÄ±">
+                  <div className="usage-chart" aria-label="Son 24 saatte kullanılan token miktarı">
                     {usage.hourly.length > 0 ? (
                       <div className="usage-bars">
                         {usage.hourly.map((hour) => (
                           <div
                             className="usage-bar-slot"
                             key={hour.start_time}
-                            title={`${formatTimestamp(hour.start_time)} Â· ${formatNumber(hour.total_tokens)} tokens`}
+                            title={`${formatTimestamp(hour.start_time)} · ${formatNumber(hour.total_tokens)} tokens`}
                           >
                             <div
                               className="usage-bar"
@@ -1105,7 +1165,7 @@ export default function App() {
                         ))}
                       </div>
                     ) : (
-                      <span className="usage-chart-empty">HenÃ¼z saatlik OpenAI verisi yok.</span>
+                      <span className="usage-chart-empty">Henüz saatlik OpenAI verisi yok.</span>
                     )}
                   </div>
                 </section>
@@ -1113,7 +1173,7 @@ export default function App() {
                 <section className="usage-section">
                   <div className="usage-section-heading">
                     <h2>Recent calls</h2>
-                    <span>Son {usage.recent_calls.length} Ã§aÄŸrÄ±</span>
+                    <span>Son {usage.recent_calls.length} çağrı</span>
                   </div>
                   <div className="usage-call-list">
                     {usage.recent_calls.map((call) => (
@@ -1133,7 +1193,7 @@ export default function App() {
                     <div className="usage-section-heading">
                       <h2>Integrations & local tools</h2>
                       <span>
-                        {formatNumber(usage.tool_usage.totals.calls)} Ã§aÄŸrÄ± Â· {formatNumber(usage.tool_usage.totals.api_requests)} API isteÄŸi
+                        {formatNumber(usage.tool_usage.totals.calls)} çağrı · {formatNumber(usage.tool_usage.totals.api_requests)} API isteği
                       </span>
                     </div>
                     <div className="usage-integration-list">
@@ -1165,17 +1225,17 @@ export default function App() {
       ) : page === "devices" ? (
         <main className="panel-page">
           <section className="panel">
-            <div className="panel-kicker">DEVICES Â· LIVE</div>
+            <div className="panel-kicker">DEVICES · LIVE</div>
             <h1>Devices</h1>
             <p>
-              EPIS'e baÄŸlÄ± cihazlar ve izinli yetenekleri. Hassas cihaz durumu yerelde kalÄ±r.
+              EPIS'e bağlı cihazlar ve izinli yetenekleri. Hassas cihaz durumu yerelde kalır.
             </p>
 
-            {devicesLoading && <div className="usage-state">YÃ¼kleniyor...</div>}
+            {devicesLoading && <div className="usage-state">Yükleniyor...</div>}
             {devicesError && <div className="usage-state error-state">{devicesError}</div>}
             {!devicesLoading && !devicesError && devices.length === 0 && (
               <div className="usage-state">
-                BaÄŸlÄ± cihaz yok. Desktop uygulamasÄ±nÄ± yeniden baÅŸlattÄ±ÄŸÄ±nda Windows ajanÄ± otomatik baÄŸlanÄ±r.
+                Bağlı cihaz yok. Desktop uygulamasını yeniden başlattığında Windows ajanı otomatik bağlanır.
               </div>
             )}
             {!devicesLoading && !devicesError && devices.length > 0 && (
@@ -1185,7 +1245,7 @@ export default function App() {
                     <div className="device-card-heading">
                       <div>
                         <strong>{device.display_name}</strong>
-                        <span>{device.platform} Â· {device.device_id}</span>
+                        <span>{device.platform} · {device.device_id}</span>
                       </div>
                       <span className={`device-status ${device.online ? "online" : "offline"}`}>
                         {device.online ? "Online" : "Offline"}
@@ -1202,29 +1262,52 @@ export default function App() {
             )}
           </section>
         </main>
+      ) : page === "settings" ? (
+        <main className="panel-page">
+          <section className="panel">
+            <div className="panel-kicker">SETTINGS · DESKTOP</div>
+            <h1>Settings</h1>
+            <p>Desktop agent ve Windows başlangıç davranışı.</p>
+
+            <div className="settings-list">
+              <article className="settings-card">
+                <div>
+                  <strong>PC Agent</strong>
+                  <span>EPIS Desktop açıldığında Windows Agent sessizce başlar ve Heroku bağlantısını otomatik yeniden kurar.</span>
+                </div>
+                <span className={`settings-status ${agentConnection}`}>
+                  {agentConnection === "online" ? "Connected" : agentConnection === "connecting" ? "Reconnecting" : "Offline"}
+                </span>
+              </article>
+
+              <article className="settings-card">
+                <div>
+                  <strong>Start EPIS Agent with Windows</strong>
+                  <span>Windows oturumu açıldığında EPIS arka planda başlar. Pencereyi kapatmak uygulamayı tray'e küçültür.</span>
+                </div>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={startupState?.enabled ?? false}
+                    disabled={startupSaving || startupState === null || !startupState.supported}
+                    onChange={(event) => void toggleStartup(event.target.checked)}
+                  />
+                  <span className="switch-track" />
+                </label>
+              </article>
+            </div>
+
+            {settingsError && <div className="usage-state error-state">{settingsError}</div>}
+            <div className="settings-note">X düğmesi yalnızca pencereyi gizler. EPIS Agent tray'de çalışmaya devam eder. Tamamen kapatmak için tray menüsündeki “Quit EPIS” seçeneğini kullan.</div>
+          </section>
+        </main>
       ) : (
         <main className="panel-page">
           <section className="panel">
-            <div className="panel-kicker">
-              {page.toUpperCase()}
-            </div>
-
-            <h1>
-              {page === "memory" && "Memory"}
-              {page === "settings" && "Settings"}
-            </h1>
-
-            <p>
-              {page === "memory" &&
-                "Sohbet ge\u00e7mi\u015fi de\u011fil; EPIS'in kal\u0131c\u0131 memory ve identity katman\u0131 burada g\u00f6r\u00fcnecek."}
-
-              {page === "settings" &&
-                "Model, privacy, server ve EPIS davran\u0131\u015f ayarlar\u0131 burada olacak."}
-            </p>
-
-            <div className="not-connected-yet">
-              {"Backend ba\u011flant\u0131s\u0131 sonraki a\u015famada"}
-            </div>
+            <div className="panel-kicker">MEMORY</div>
+            <h1>Memory</h1>
+            <p>{"Sohbet ge\u00e7mi\u015fi de\u011fil; EPIS'in kal\u0131c\u0131 memory ve identity katman\u0131 burada g\u00f6r\u00fcnecek."}</p>
+            <div className="not-connected-yet">{"Backend ba\u011flant\u0131s\u0131 sonraki a\u015famada"}</div>
           </section>
         </main>
       )}
