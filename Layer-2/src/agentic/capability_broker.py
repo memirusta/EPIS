@@ -437,10 +437,11 @@ def default_capability_specs() -> list[CapabilitySpec]:
         CapabilitySpec(
             "computer_execute_goal",
             (
-                "Complete a GUI workflow on the intended computer from a goal, "
-                "using adaptive screenshots and interaction. Core/provider owns "
-                "target-window, credential, elevation, approval and no-progress "
-                "guards; Luna should describe the goal rather than mouse recipes."
+                "Complete an adaptive GUI workflow from a goal. If target_app is "
+                "provided, Core discovers, launches, correlates and focuses that app "
+                "before Computer Use begins. Luna describes the intended outcome, "
+                "not mouse coordinates, screenshot loops, button recipes or window "
+                "lifecycle steps."
             ),
             _schema(
                 {
@@ -457,6 +458,14 @@ def default_capability_specs() -> list[CapabilitySpec]:
             ),
             "computer.execute",
             "computer",
+            risk_class=RiskClass.YELLOW.value,
+            confirmation_required=True,
+            confirmation_notice=(
+                "Bu görev sırasında hedef uygulamanın ekran görüntüleri OpenAI "
+                "Computer Use modeline gönderilecek ve onaylanan hedef için fare/"
+                "klavye girdileri uygulanabilecek. Parola alanları ve UAC/elevation "
+                "ekranları cihaz tarafında engellenir."
+            ),
         ),
         CapabilitySpec(
             "connector_task",

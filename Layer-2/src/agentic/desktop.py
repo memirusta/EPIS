@@ -744,35 +744,34 @@ class WindowController:
 
             time.sleep(0.2)
 
-    def act(self, arguments, action):
+    def resolve_selection(
+        self,
+        arguments,
+        *,
+        refresh_ttl=False,
+    ):
+        """Resolve an opaque window token back to the same verified OS window."""
         saved = self.snapshot.get(arguments["window_id"])
-        source = self.snapshot_sources.get(
-            arguments["window_id"],
-            "list",
-        )
+        source = self.snapshot_sources.get(arguments["window_id"], "list")
         if not saved or saved[1] < time.monotonic():
-            return {
+            return None, {
                 "ok": False,
                 "error": "Window selection expired; list windows again",
             }
 
         expected = saved[0]
         if arguments["app_name"] != expected["process"]:
-            return {"ok": False, "error": "Window application mismatch"}
+            return None, {"ok": False, "error": "Window application mismatch"}
 
         current = self.backend.enumerate()
-
-        # Names alone cannot disambiguate two documents/windows from the same app.
-        # Enforce this here, not just in a model instruction.
         if (
             source != "launch"
             and sum(
                 row["process"].casefold() == expected["process"].casefold()
                 for row in current
-            )
-            > 1
+            ) > 1
         ):
-            return {
+            return None, {
                 "ok": False,
                 "error": (
                     "Multiple windows for this app; selection is ambiguous. "
@@ -785,13 +784,24 @@ class WindowController:
             None,
         )
         keys = ("hwnd", "pid", "created", "process", "class")
-
         if not actual or any(actual[key] != expected[key] for key in keys):
-            return {
+            return None, {
                 "ok": False,
                 "error": "Window identity changed; not executed",
             }
 
+        if refresh_ttl:
+            self.snapshot[arguments["window_id"]] = (
+                expected,
+                time.monotonic() + 120,
+            )
+
+        return actual, None
+
+    def act(self, arguments, action):
+        actual, error = self.resolve_selection(arguments)
+        if error:
+            return error
         return self.backend.apply(actual, action)
 
 
@@ -958,3 +968,6 @@ def register_desktop_tools(registry):
             ),
             lambda args, action=action: windows.act(args, action),
         )
+
+    # Shared with hidden Computer Use primitives.
+    return windows

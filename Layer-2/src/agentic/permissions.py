@@ -44,6 +44,9 @@ AUTO_CONFIRM_CAPABILITIES = frozenset({
     "ui.hotkey",
     "ui.scroll",
     "ui.wait",
+    # Hidden Computer Use primitives; semantic computer.execute is confirmed once.
+    "computer.capture",
+    "computer.actions",
     "system.info",
     "system.battery",
     "system.disk",

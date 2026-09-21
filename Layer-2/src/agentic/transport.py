@@ -1,4 +1,4 @@
-﻿"""Device transport contract and a bounded, non-networked subprocess implementation."""
+"""Device transport contract and a bounded, non-networked subprocess implementation."""
 import json
 import os
 from pathlib import Path
@@ -12,7 +12,9 @@ import uuid
 
 from .devices import Device, DeviceRegistry
 
-MAX_FRAME = 65536
+# Window screenshots are JPEG-compressed and capped below 1 MB before base64.
+# Leave bounded JSON-envelope headroom.
+MAX_FRAME = 2 * 1024 * 1024
 
 
 class DeviceTransport(Protocol):

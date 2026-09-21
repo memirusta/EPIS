@@ -66,22 +66,28 @@ These operations do not mutate the user's PC.
 Computer Use is a separate interactive provider because the model-side loop and
 the target desktop are on different sides of the device boundary in cloud mode.
 
-The provider contract should own:
+`OpenAIComputerUseProvider` implements this path. It keeps the Responses loop
+stateless (`store=False`) and requests encrypted reasoning content so response
+items can be replayed. The Windows device exposes only two hidden primitives:
+frame capture and frame-bound action execution. Luna sees only
+`computer_execute_goal`.
 
+The provider/device path owns:
+
+- deterministic app discovery/launch/focus when `target_app` is supplied
 - screenshot capture from the selected target window/device
-- structured click/type/keypress/scroll/drag execution
-- target-window identity guard
-- credential/password guard
-- elevation/UAC guard
-- consequential-action approval bridge
+- structured click/type/keypress/scroll/drag/move execution
+- opaque frame IDs so coordinates cannot be replayed against another screenshot
+- target-window identity and foreground-process guards
+- password-field and elevation/UAC guards
+- one goal-level EPIS approval before screenshots/input begin
 - unexpected-app-switch guard
 - no-progress loop detection
 - screenshot feedback until goal completion
 
-There is deliberately **no fixed action-count or wall-clock limit** in the
-architecture. Stopping is state-based: completion, user cancellation, required
-approval/input, lost target identity, blocked sensitive surface, unknown outcome,
-or detected no-progress loop.
+There is deliberately **no fixed total action-count or wall-clock limit** in the
+architecture. Bounded action batches and screenshot frame sizes protect the
+transport; workflow stopping is state-based.
 
 ### Connectors / MCP
 

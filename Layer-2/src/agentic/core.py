@@ -1,4 +1,4 @@
-﻿"""The EPIS 0.1 text-agent loop and deterministic execution boundary."""
+"""The EPIS 0.1 text-agent loop and deterministic execution boundary."""
 
 from __future__ import annotations
 
@@ -228,11 +228,32 @@ class AgentCore:
 
         self._call_tasks: dict[str, str] = {}
 
+        self._register_runtime_capability_providers()
+
         # Salt-okuma izinleri yalnizca bu EPIS processinde yasar.
         # EPIS kapaninca otomatik olarak unutulur.
         self._session_read_grants: set[tuple[str, str]] = set()
 
         self._restore_hot_history()
+
+    def _register_runtime_capability_providers(
+        self,
+    ) -> None:
+        """Attach providers that need live Core/device routing callbacks."""
+        if self.capability_broker.get("computer_execute_goal") is None:
+            return
+
+        from .computer_use import CoreComputerBridge, OpenAIComputerUseProvider
+
+        try:
+            self.capability_broker.register_provider(
+                OpenAIComputerUseProvider(
+                    CoreComputerBridge(self),
+                    usage_repository=self.usage_repository,
+                )
+            )
+        except ValueError:
+            pass
 
     def _restore_hot_history(
         self,

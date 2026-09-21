@@ -5,6 +5,7 @@ python-dotenv
 schedule
 psutil
 pywin32; sys_platform == 'win32'
+Pillow; sys_platform == 'win32'
 fastapi
 uvicorn[standard]
 websockets>=13,<17

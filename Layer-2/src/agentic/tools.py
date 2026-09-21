@@ -307,7 +307,9 @@ def build_local_registry() -> ToolRegistry:
                                "required": ["url"], "additionalProperties": False},
                               "browser.open_url", RiskClass.YELLOW.value, True), _open_url)
     from .desktop import register_desktop_tools
-    register_desktop_tools(registry)
+    windows = register_desktop_tools(registry)
+    from .computer_device import register_computer_device_tools
+    register_computer_device_tools(registry, windows)
     from .media import register_media_tools
     from .filesystem import register_folder_tools
     from .system_tools import register_system_tools

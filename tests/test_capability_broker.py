@@ -15,6 +15,7 @@ sys.path.insert(
 from agentic.capability_broker import (
     CapabilityBroker,
     CapabilitySpec,
+    default_capability_specs,
 )
 from agentic.luna import ToolCall
 from test_agentic_core import build_core
@@ -80,6 +81,17 @@ def broker_with(*providers):
 
 
 class CapabilityBrokerTests(unittest.TestCase):
+    def test_computer_goal_contract_is_semantic_and_confirmed_once(self):
+        spec = next(
+            item
+            for item in default_capability_specs()
+            if item.name == "computer_execute_goal"
+        )
+        self.assertEqual(spec.capability, "computer.execute")
+        self.assertTrue(spec.confirmation_required)
+        self.assertEqual(spec.risk_class, "yellow")
+        self.assertNotIn("coordinate", spec.schema["properties"])
+
     def test_only_live_provider_tools_are_exposed(self):
         unavailable = FakeProvider(
             "offline",

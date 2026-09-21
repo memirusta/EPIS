@@ -14,7 +14,7 @@ from agentic.permissions import PermissionEngine
 from agentic.tools import build_local_registry
 
 PROTOCOL_VERSION = 1
-MAX_FRAME = 65536
+MAX_FRAME = 2 * 1024 * 1024
 
 
 class DeviceWorker:

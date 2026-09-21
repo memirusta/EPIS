@@ -18,7 +18,7 @@ from agentic.device_worker import DeviceWorker
 
 
 logger = logging.getLogger("EPIS.DEVICE")
-MAX_MESSAGE_BYTES = 64 * 1024
+MAX_MESSAGE_BYTES = 2 * 1024 * 1024
 
 
 def device_url(server_url: str) -> str:
