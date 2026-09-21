@@ -11,6 +11,7 @@ import time
 import uuid
 from typing import Any
 
+from .capability_broker import CapabilityBroker
 from .devices import DeviceRegistry
 from .execution import ExecutionEngine
 from .luna import LunaClient, ToolCall
@@ -191,6 +192,7 @@ class AgentCore:
         hot_memory=None,
         usage_repository=None,
         execution: ExecutionEngine | None = None,
+        capability_broker: CapabilityBroker | None = None,
     ):
         self.luna = luna
         self.system_prompt = system_prompt
@@ -202,6 +204,10 @@ class AgentCore:
         self.permissions = permissions or PermissionEngine()
         self.sol = sol or SolDelegator()
         self.execution = execution or ExecutionEngine()
+        self.capability_broker = (
+            capability_broker
+            or CapabilityBroker()
+        )
 
         self.hot_memory = hot_memory
         self.usage_repository = usage_repository
@@ -453,6 +459,7 @@ class AgentCore:
         return {
             "devices": devices,
             "tools": tools,
+            "broker": self.capability_broker.manifest(),
         }
 
     def handle(
@@ -592,6 +599,13 @@ class AgentCore:
                 "precondition. Treat core_recovery entries as machine observations, "
                 "not user-facing prose. Routine UI tools must never bypass sensitive "
                 "UI tools. If outcome is unknown, never retry automatically."
+                "\n\n# CAPABILITY BROKER\n"
+                "Prefer a live semantic broker tool when it directly matches the "
+                "user's intent (for example fresh web research, hosted computation, "
+                "vision or configured hosted file search). Provider choice is Core's "
+                "job: never invent provider IDs, endpoints, vector-store IDs or "
+                "implementation recipes. If a semantic capability is absent from the "
+                "live manifest, do not claim that provider-backed ability is live."
             )
         )
 
@@ -1477,6 +1491,166 @@ class AgentCore:
             }
         return dict(turn.tool_results[-1])
 
+    def _dispatch_broker(
+        self,
+        call: ToolCall,
+        confirmed: bool,
+    ) -> AgentTurn:
+        spec = self.capability_broker.get(
+            call.name
+        )
+        if spec is None:
+            return AgentTurn(
+                "",
+                [{
+                    "ok": False,
+                    "error": (
+                        f"Unknown capability tool: "
+                        f"{call.name}"
+                    ),
+                }],
+            )
+
+        error = self.capability_broker.validate(
+            spec.schema,
+            call.arguments,
+        )
+        if error:
+            return AgentTurn(
+                "",
+                [{
+                    "ok": False,
+                    "error": error,
+                }],
+            )
+
+        decision = self.permissions.decide(
+            spec,
+            call.arguments,
+        )
+        if not decision.allowed:
+            return AgentTurn(
+                "",
+                [{
+                    "ok": False,
+                    "error": decision.reason,
+                }],
+            )
+
+        provider = (
+            self.capability_broker
+            .resolve_provider(
+                spec.capability
+            )
+        )
+        if provider is None:
+            return AgentTurn(
+                "",
+                [{
+                    "ok": False,
+                    "error": (
+                        "capability_provider_unavailable"
+                    ),
+                    "capability": spec.capability,
+                }],
+            )
+
+        if (
+            decision.requires_confirmation
+            and not confirmed
+        ):
+            return AgentTurn(
+                "",
+                [],
+                True,
+                {
+                    "tool": call.name,
+                    "capability": spec.capability,
+                    "risk": spec.risk_class,
+                    "target": provider.display_name,
+                    "arguments": deepcopy(
+                        call.arguments
+                    ),
+                    "reason": decision.reason,
+                    "notice": (
+                        spec.confirmation_notice
+                    ),
+                },
+            )
+
+        if (
+            call.call_id
+            not in self._call_tasks
+        ):
+            self._call_tasks[
+                call.call_id
+            ] = self.tasks.create(
+                call.name,
+                (
+                    "provider:"
+                    + provider.provider_id
+                ),
+            )
+
+        task_id = self._call_tasks[
+            call.call_id
+        ]
+        if not self.tasks.claim(task_id):
+            return AgentTurn(
+                "",
+                [{
+                    "ok": False,
+                    "task_id": task_id,
+                    "error": (
+                        "Action already claimed; "
+                        "not replayed"
+                    ),
+                }],
+            )
+
+        started_at = time.perf_counter()
+        dispatched = (
+            self.capability_broker.dispatch(
+                call.name,
+                call.arguments,
+            )
+        )
+        result = dict(dispatched.result)
+
+        state = (
+            "unknown"
+            if result.get("outcome") == "unknown"
+            else (
+                "succeeded"
+                if result.get("ok")
+                else "failed"
+            )
+        )
+        self.tasks.finish(
+            task_id,
+            state,
+        )
+
+        self._log(
+            "capability_dispatched",
+            tool=call.name,
+            capability=spec.capability,
+            provider=dispatched.provider_id,
+            ok=result.get("ok"),
+            latency_ms=round(
+                (
+                    time.perf_counter()
+                    - started_at
+                )
+                * 1000
+            ),
+        )
+
+        return AgentTurn(
+            "",
+            [result],
+        )
+
     def _dispatch(
         self,
         call: ToolCall,
@@ -1536,6 +1710,17 @@ class AgentCore:
             return AgentTurn(
                 "",
                 [result],
+            )
+
+        if (
+            self.capability_broker.get(
+                call.name
+            )
+            is not None
+        ):
+            return self._dispatch_broker(
+                call,
+                confirmed,
             )
 
         entry = self.registry.get(
@@ -2025,6 +2210,7 @@ class AgentCore:
             *self.registry.openai_schemas(
                 live_capabilities
             ),
+            *self.capability_broker.openai_schemas(),
             *CORE_TOOL_SCHEMAS,
             SOL_TOOL_SCHEMA,
         ]
@@ -2129,6 +2315,7 @@ class AgentCore:
             transport.close()
 
         self.tasks.close()
+        self.capability_broker.close()
 
         if self.usage_repository is not None:
             self.usage_repository.close()

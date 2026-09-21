@@ -10,6 +10,7 @@ from epis_core import build_system_prompt
 from memory_manager import MemoryManager
 from privacy import PrivacyFilter
 
+from .capability_broker import build_default_capability_broker
 from .core import AgentCore
 from .devices import DeviceRegistry, LocalDeviceAgent, UnavailableDeviceAgent
 from .hot_memory import HotConversationStore
@@ -95,6 +96,9 @@ def create_core() -> AgentCore:
     )
     usage = OpenAIOrganizationUsageRepository(local_usage)
 
+    capability_broker = build_default_capability_broker(
+        usage_repository=usage,
+    )
     local_agent = None
 
     try:
@@ -161,6 +165,7 @@ def create_core() -> AgentCore:
             tasks=tasks,
             hot_memory=hot_memory,
             usage_repository=usage,
+            capability_broker=capability_broker,
         )
 
     except Exception:
@@ -168,6 +173,7 @@ def create_core() -> AgentCore:
             local_agent.close()
 
         tasks.close()
+        capability_broker.close()
         usage.close()
 
         raise
