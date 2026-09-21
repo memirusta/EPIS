@@ -115,7 +115,7 @@ class SpotifyController:
         ).strip()
         self.store = token_store or SpotifyTokenStore()
         self.session = session or requests.Session()
-        self.opener = opener or os.startfile
+        self.opener = opener if opener is not None else getattr(os, "startfile", None)
         self.clock = clock or time.time
         self.pending_auth: PendingAuthorization | None = None
         self.track_refs: dict[str, tuple[float, dict]] = {}
@@ -196,6 +196,12 @@ class SpotifyController:
                 "ok": False,
                 "error": "spotify_client_id_missing",
                 "setup_required": True,
+            }
+
+        if not callable(self.opener):
+            return {
+                "ok": False,
+                "error": "spotify_browser_open_unavailable",
             }
 
         endpoint = self._validate_redirect_uri()
