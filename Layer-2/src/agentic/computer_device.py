@@ -447,15 +447,29 @@ class WindowsComputerBackend:
 
     @staticmethod
     def type_text(text: str) -> None:
-        """Type Unicode without using or reading the clipboard."""
+        """Type Unicode with Win32 SendInput without touching the clipboard."""
         import ctypes
         from ctypes import wintypes
 
-        user32 = ctypes.windll.user32
         INPUT_KEYBOARD = 1
         KEYEVENTF_KEYUP = 0x0002
         KEYEVENTF_UNICODE = 0x0004
-        ULONG_PTR = wintypes.WPARAM
+
+        ULONG_PTR = (
+            ctypes.c_ulonglong
+            if ctypes.sizeof(ctypes.c_void_p) == 8
+            else ctypes.c_ulong
+        )
+
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_ = [
+                ("dx", wintypes.LONG),
+                ("dy", wintypes.LONG),
+                ("mouseData", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ULONG_PTR),
+            ]
 
         class KEYBDINPUT(ctypes.Structure):
             _fields_ = [
@@ -466,53 +480,115 @@ class WindowsComputerBackend:
                 ("dwExtraInfo", ULONG_PTR),
             ]
 
-        class _INPUTUNION(ctypes.Union):
-            _fields_ = [("ki", KEYBDINPUT)]
+        class HARDWAREINPUT(ctypes.Structure):
+            _fields_ = [
+                ("uMsg", wintypes.DWORD),
+                ("wParamL", wintypes.WORD),
+                ("wParamH", wintypes.WORD),
+            ]
+
+        class INPUTUNION(ctypes.Union):
+            _fields_ = [
+                ("mi", MOUSEINPUT),
+                ("ki", KEYBDINPUT),
+                ("hi", HARDWAREINPUT),
+            ]
 
         class INPUT(ctypes.Structure):
             _anonymous_ = ("u",)
             _fields_ = [
                 ("type", wintypes.DWORD),
-                ("u", _INPUTUNION),
+                ("u", INPUTUNION),
             ]
 
-        units = text.encode(
-            "utf-16-le",
-            "surrogatepass",
+        expected_size = (
+            40
+            if ctypes.sizeof(ctypes.c_void_p) == 8
+            else 28
         )
-        for index in range(0, len(units), 2):
-            code = int.from_bytes(
-                units[index:index + 2],
+        if ctypes.sizeof(INPUT) != expected_size:
+            raise OSError(
+                f"Unexpected Win32 INPUT size: "
+                f"{ctypes.sizeof(INPUT)} != {expected_size}"
+            )
+
+        user32 = ctypes.WinDLL(
+            "user32",
+            use_last_error=True,
+        )
+        user32.SendInput.argtypes = [
+            wintypes.UINT,
+            ctypes.POINTER(INPUT),
+            ctypes.c_int,
+        ]
+        user32.SendInput.restype = wintypes.UINT
+
+        units = [
+            int.from_bytes(
+                text.encode(
+                    "utf-16-le",
+                    "surrogatepass",
+                )[index:index + 2],
                 "little",
             )
-            down = INPUT(
-                type=INPUT_KEYBOARD,
-                ki=KEYBDINPUT(
-                    0,
-                    code,
-                    KEYEVENTF_UNICODE,
-                    0,
-                    0,
+            for index in range(
+                0,
+                len(
+                    text.encode(
+                        "utf-16-le",
+                        "surrogatepass",
+                    )
                 ),
-            )
-            up = INPUT(
-                type=INPUT_KEYBOARD,
-                ki=KEYBDINPUT(
-                    0,
-                    code,
-                    KEYEVENTF_UNICODE
-                    | KEYEVENTF_KEYUP,
-                    0,
-                    0,
-                ),
-            )
-            sent = user32.SendInput(
                 2,
-                (INPUT * 2)(down, up),
+            )
+        ]
+
+        # Keep each native call bounded. This is not a workflow/action limit.
+        for offset in range(0, len(units), 128):
+            events = []
+
+            for code in units[offset:offset + 128]:
+                events.append(
+                    INPUT(
+                        type=INPUT_KEYBOARD,
+                        ki=KEYBDINPUT(
+                            0,
+                            code,
+                            KEYEVENTF_UNICODE,
+                            0,
+                            0,
+                        ),
+                    )
+                )
+                events.append(
+                    INPUT(
+                        type=INPUT_KEYBOARD,
+                        ki=KEYBDINPUT(
+                            0,
+                            code,
+                            KEYEVENTF_UNICODE
+                            | KEYEVENTF_KEYUP,
+                            0,
+                            0,
+                        ),
+                    )
+                )
+
+            batch = (INPUT * len(events))(*events)
+
+            ctypes.set_last_error(0)
+            sent = user32.SendInput(
+                len(events),
+                batch,
                 ctypes.sizeof(INPUT),
             )
-            if sent != 2:
-                raise OSError("SendInput failed")
+
+            if sent != len(events):
+                error = ctypes.get_last_error()
+                raise OSError(
+                    error or 1,
+                    f"SendInput sent {sent}/{len(events)} events",
+                )
 
 
 class ComputerDeviceController:
