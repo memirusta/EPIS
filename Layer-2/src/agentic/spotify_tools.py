@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import secrets
 import threading
@@ -643,6 +644,20 @@ class SpotifyController:
                 if not item.get("is_restricted")
             ]
 
+            hostname = platform.node().casefold().strip()
+
+            local_native = next(
+                (
+                    item
+                    for item in controllable
+                    if hostname
+                    and str(
+                        item.get("name") or ""
+                    ).casefold().strip() == hostname
+                ),
+                None,
+            )
+
             active = next(
                 (
                     item
@@ -652,7 +667,12 @@ class SpotifyController:
                 None,
             )
 
-            if active is not None:
+            if local_native is not None:
+                # When this EPIS device owns a matching Spotify
+                # desktop endpoint, prefer it over browser players.
+                selected = local_native
+
+            elif active is not None:
                 selected = active
 
             elif len(controllable) == 1:
@@ -745,16 +765,51 @@ class SpotifyController:
                 verified = True
                 break
 
+        if not verified:
+            public = track["public"]
+            artists = ", ".join(
+                str(item)
+                for item in public.get("artists") or []
+            )
+            label = str(
+                public.get("name")
+                or "requested track"
+            )
+
+            if artists:
+                label = f"{label} — {artists}"
+
+            return {
+                "ok": False,
+                "error": "spotify_playback_not_observed",
+                "outcome": "not_observed",
+                "track": public,
+                "device": device.get("public"),
+                "state_verified": False,
+                "core_recovery": [
+                    {
+                        "tool": "computer_execute_goal",
+                        "arguments": {
+                            "goal": (
+                                f'Play the track "{label}" in '
+                                "the Spotify desktop app, not "
+                                "the web player. Verify visually "
+                                "that the requested track is "
+                                "actually playing."
+                            ),
+                            "target_app": "Spotify",
+                        },
+                        "status": "fallback_available",
+                    }
+                ],
+            }
+
         return {
             "ok": True,
-            "status": (
-                "playback_verified"
-                if verified
-                else "playback_requested_unverified"
-            ),
+            "status": "playback_verified",
             "track": track["public"],
             "device": device.get("public"),
-            "state_verified": verified,
+            "state_verified": True,
         }
 
     def pause(self, arguments: dict) -> dict:
