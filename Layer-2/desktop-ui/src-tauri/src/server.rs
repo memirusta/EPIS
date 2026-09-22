@@ -165,10 +165,6 @@ impl LocalServer {
                 .env(
                     "EPIS_SPOTIFY_CLIENT_ID",
                     env::var("EPIS_SPOTIFY_CLIENT_ID").unwrap_or_default(),
-                )
-                .env(
-                    "EPIS_SPOTIFY_REDIRECT_URI",
-                    env::var("EPIS_SPOTIFY_REDIRECT_URI").unwrap_or_default(),
                 );
 
             copy_safe_device_environment(&mut command);
