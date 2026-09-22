@@ -117,6 +117,7 @@ def app_match_score(query: str, name: str) -> int:
         "app",
         "application",
         "browser",
+        "desktop",
         "windows",
         "microsoft",
     }
