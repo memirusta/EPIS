@@ -540,55 +540,55 @@ class AgentCore:
                 "dogrulanmamis bir durumu dogrulanmis gibi soyleme. "
             )
             + (
-                "Tool sonucu gÃ¶rmeden iÅŸlem yapÄ±lmÄ±ÅŸ gibi konuÅŸma. "
-                "Tool Ã§aÄŸrÄ±larÄ± yalnÄ±zca Ã¶neridir; Core izin ve cihaz "
-                "kontrolÃ¼nden geÃ§irir. Tool sonucu geldikten sonra "
-                "kullanÄ±cÄ±ya doÄŸal, kÄ±sa ve tek EPIS sesiyle yanÄ±t ver. "
+                "Tool sonucu görmeden işlem yapılmış gibi konuşma. "
+                "Tool çağrıları yalnızca öneridir; Core izin ve cihaz "
+                "kontrolünden geçirir. Tool sonucu geldikten sonra "
+                "kullanıcıya doğal, kısa ve tek EPIS sesiyle yanıt ver. "
 
-                "KarmaÅŸÄ±k analiz, coding, planning veya repository inceleme "
+                "Karmaşık analiz, coding, planning veya repository inceleme "
                 "gerekiyorsa delegate_to_sol kullan; normal sohbet ve yerel "
-                "cihaz araÃ§larÄ± iÃ§in Sol'u Ã§aÄŸÄ±rma. "
+                "cihaz araçları için Sol'u çağırma. "
 
-                "Sol sonucunu doÄŸrudan yapÄ±ÅŸtÄ±rma, EPIS'in tutarlÄ± sesiyle "
+                "Sol sonucunu doğrudan yapıştırma, EPIS'in tutarlı sesiyle "
                 "sentezle. "
 
-                "Repository incelemesinde Luna orkestratÃ¶rdÃ¼r, Sol uzman "
-                "analiz katmanÄ±dÄ±r. "
+                "Repository incelemesinde Luna orkestratördür, Sol uzman "
+                "analiz katmanıdır. "
 
-                "KullanÄ±cÄ± repo yolunu verdiyse veya yakÄ±n sohbet baÄŸlamÄ±ndan "
+                "Kullanıcı repo yolunu verdiyse veya yakın sohbet bağlamından "
                 "biliniyorsa tekrar isteme. "
 
-                "Ã–nce list_folder, get_file_info ve read_text_file gibi yerel "
-                "araÃ§larla gÃ¶reve iliÅŸkin repository yapÄ±sÄ±nÄ± ve ilgili "
-                "dosyalarÄ± gerÃ§ekten incele. "
+                "Önce list_folder, get_file_info ve read_text_file gibi yerel "
+                "araçlarla göreve ilişkin repository yapısını ve ilgili "
+                "dosyaları gerçekten incele. "
 
-                "ArdÄ±ndan delegate_to_sol Ã§aÄŸrÄ±sÄ±nda repo_path alanÄ±na repo "
-                "yolunu, context alanÄ±na yalnÄ±zca araÃ§larla gerÃ§ekten gÃ¶rdÃ¼ÄŸÃ¼n "
-                "ilgili dosya yollarÄ±nÄ±, kod iÃ§eriklerini, testleri ve "
-                "gÃ¶zlemleri koy. "
+                "Ardından delegate_to_sol çağrısında repo_path alanına repo "
+                "yolunu, context alanına yalnızca araçlarla gerçekten gördüğün "
+                "ilgili dosya yollarını, kod içeriklerini, testleri ve "
+                "gözlemleri koy. "
 
-                "Sadece repo yolunu verip Sol'dan diski aÃ§masÄ±nÄ± isteme; "
-                "Sol yerel dosya sistemine doÄŸrudan eriÅŸemez. "
+                "Sadece repo yolunu verip Sol'dan diski açmasını isteme; "
+                "Sol yerel dosya sistemine doğrudan erişemez. "
 
-                "KullanÄ±cÄ±nÄ±n isteÄŸine gÃ¶re Sol iÃ§in aÃ§Ä±k ve teknik bir "
-                "gÃ¶rev yaz. "
+                "Kullanıcının isteğine göre Sol için açık ve teknik bir "
+                "görev yaz. "
 
-                "Sol bir deÄŸiÅŸiklik Ã¶nerirse bunu otomatik uygulama; "
-                "kullanÄ±cÄ±ya hangi dosya veya fonksiyonda ne Ã¶nerdiÄŸini, "
-                "nedenini, riskini ve gereken testi EPIS'in kendi aÄŸzÄ±yla "
-                "anlat ve uygulamak isteyip istemediÄŸini sor. "
+                "Sol bir değişiklik önerirse bunu otomatik uygulama; "
+                "kullanıcıya hangi dosya veya fonksiyonda ne önerdiğini, "
+                "nedenini, riskini ve gereken testi EPIS'in kendi ağzıyla "
+                "anlat ve uygulamak isteyip istemediğini sor. "
 
-                "KullanÄ±cÄ± daha sonraki bir mesajda aÃ§Ä±kÃ§a onay verirse "
-                "deÄŸiÅŸiklikten Ã¶nce ilgili dosyalarÄ± yeniden oku ve gÃ¼ncel "
-                "olduklarÄ±nÄ± doÄŸrula. "
+                "Kullanıcı daha sonraki bir mesajda açıkça onay verirse "
+                "değişiklikten önce ilgili dosyaları yeniden oku ve güncel "
+                "olduklarını doğrula. "
 
-                "KullanÄ±cÄ± desteklenen bir iÅŸlemi istediyse uygun tool "
-                "Ã§aÄŸrÄ±sÄ±nÄ± Ã¶ner. "
+                "Kullanıcı desteklenen bir işlemi istediyse uygun tool "
+                "çağrısını öner. "
 
-                "Onay gereken bir araÃ§ iÃ§in tool Ã§aÄŸrÄ±sÄ±nÄ± normal ÅŸekilde Ã¼ret; "
-                "onay kararÄ±nÄ± model verme. Core iÅŸlemi durdurur, Luna'dan ayrÄ± "
-                "bir doÄŸal onay aÃ§Ä±klamasÄ± Ã¼rettirir ve UI Evet/HayÄ±r kartÄ± gÃ¶sterir. "
-                "Onay gelmeden iÅŸlemi yapÄ±lmÄ±ÅŸ sayma. "
+                "Onay gereken bir araç için tool çağrısını normal şekilde üret; "
+                "onay kararını model verme. Core işlemi durdurur, Luna'dan ayrı "
+                "bir doğal onay açıklaması ürettirir ve UI Evet/Hayır kartı gösterir. "
+                "Onay gelmeden işlemi yapılmış sayma. "
 
                 "Yalnızca bir uygulamayı açma isteğinde kullanıcı uygulamayı takma ad, "
                 "renk, kategori, kısaltma veya komut adıyla tarif edebilir. Bunu semantik "
@@ -604,8 +604,8 @@ class AgentCore:
                 "Komut istemcileri uygulama olarak açılabilir ama bu onların içinde "
                 "komut çalıştırma izni vermez. "
 
-                "AraÃ§ argÃ¼manlarÄ± belirsizse aÃ§Ä±klayÄ±cÄ± soru sor. "
-                "Desteklenmeyen iÅŸlemi desteklenmiÅŸ sayma."
+                "Araç argümanları belirsizse açıklayıcı soru sor. "
+                "Desteklenmeyen işlemi desteklenmiş sayma."
             )
         )
 
@@ -895,7 +895,7 @@ class AgentCore:
     ) -> AgentTurn:
         if not self.pending:
             return AgentTurn(
-                "Onay bekleyen bir iÅŸlem yok.",
+                "Onay bekleyen bir işlem yok.",
                 [],
             )
 
@@ -989,7 +989,7 @@ class AgentCore:
     ) -> AgentTurn:
         if not self.pending:
             return AgentTurn(
-                "Onay bekleyen bir iÅŸlem yok.",
+                "Onay bekleyen bir işlem yok.",
                 [],
             )
 
@@ -1035,7 +1035,7 @@ class AgentCore:
             )
 
         text = (
-            "Tamam, bekleyen iÅŸlemleri iptal ettim."
+            "Tamam, bekleyen işlemleri iptal ettim."
         )
 
         pending.messages.append(
@@ -1124,12 +1124,12 @@ class AgentCore:
                     )
 
                     text = (
-                        "AraÃ§ sonuÃ§larÄ± alÄ±ndÄ± ama yanÄ±t baÄŸlantÄ±sÄ± kesildi. "
-                        "Ä°ÅŸlemleri otomatik tekrarlamadÄ±m."
+                        "Araç sonuçları alındı ama yanıt bağlantısı kesildi. "
+                        "İşlemleri otomatik tekrarlamadım."
                         if results
                         else (
-                            "Model baÄŸlantÄ±sÄ± kurulamadÄ±. "
-                            "Anahtar, bakiye ve baÄŸlantÄ±yÄ± "
+                            "Model bağlantısı kurulamadı. "
+                            "Anahtar, bakiye ve bağlantıyı "
                             "kontrol edebilirsin."
                         )
                     )
@@ -1162,7 +1162,7 @@ class AgentCore:
                     text = (
                         reply.text
                         or (
-                            "YanÄ±t tamamlanamadÄ±; "
+                            "Yanıt tamamlanamadı; "
                             "tekrar dener misin?"
                         )
                     )
@@ -1350,8 +1350,8 @@ class AgentCore:
                     )
 
         fallback = (
-            "Ä°ÅŸlemi tamamlayamadÄ±m; "
-            "fazla sayÄ±da araÃ§ adÄ±mÄ± oluÅŸtu."
+            "İşlemi tamamlayamadım; "
+            "fazla sayıda araç adımı oluştu."
         )
 
         messages.append(
@@ -1811,7 +1811,7 @@ class AgentCore:
 
             if error:
                 return AgentTurn(
-                    "GeÃ§ersiz istek.",
+                    "Geçersiz istek.",
                     [
                         {
                             "ok": False,
@@ -1889,7 +1889,7 @@ class AgentCore:
 
         if error:
             return AgentTurn(
-                "GeÃ§ersiz araÃ§ isteÄŸi.",
+                "Geçersiz araç isteği.",
                 [
                     {
                         "ok": False,
@@ -1908,8 +1908,8 @@ class AgentCore:
         if not decision.allowed:
             return AgentTurn(
                 (
-                    "Bu iÅŸlem izin politikasÄ± "
-                    "tarafÄ±ndan engellendi."
+                    "Bu işlem izin politikası "
+                    "tarafından engellendi."
                 ),
                 [
                     {
@@ -2031,8 +2031,8 @@ class AgentCore:
 
             return AgentTurn(
                 (
-                    "Bu iÅŸlemi yapabilecek "
-                    "Ã§evrimiÃ§i bir cihaz yok."
+                    "Bu işlemi yapabilecek "
+                    "çevrimiçi bir cihaz yok."
                 ),
                 [
                     {
@@ -2057,8 +2057,8 @@ class AgentCore:
 
             return AgentTurn(
                 (
-                    "Uzak cihaz ajanÄ± henÃ¼z "
-                    "bu oturumda baÄŸlÄ± deÄŸil."
+                    "Uzak cihaz ajanı henüz "
+                    "bu oturumda bağlı değil."
                 ),
                 [
                     {
@@ -2103,8 +2103,8 @@ class AgentCore:
         ):
             return AgentTurn(
                 (
-                    "Bu iÅŸlem tekrar "
-                    "Ã§alÄ±ÅŸtÄ±rÄ±lmadÄ±."
+                    "Bu işlem tekrar "
+                    "çalıştırılmadı."
                 ),
                 [
                     {
@@ -2254,7 +2254,7 @@ class AgentCore:
                 self.memory.log_interaction(
                     "agent_turn",
                     (
-                        f"kullanÄ±cÄ±: {user_message}\n"
+                        f"kullanıcı: {user_message}\n"
                         f"EPIS: {response}"
                     ),
                     tags=[

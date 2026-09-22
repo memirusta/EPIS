@@ -103,24 +103,150 @@ class ShellTests(unittest.TestCase):
             set_shell_enabled(False)
             self.assertFalse(shell_enabled())
 
-    def test_every_new_capability_requires_real_boolean_approval(self):
+    def test_worker_boolean_envelope_and_confirmation_policy(self):
         worker = DeviceWorker()
-        cases = [("files.info", {"root": "workspace", "relative_path": "x.txt"}),
-                 ("files.read_text", {"root": "workspace", "relative_path": "x.txt"}),
-                 ("files.write_text", {"root": "workspace", "relative_path": "x.txt", "content": "x"}),
-                 ("shell.powershell", {"root": "workspace", "command": "Write-Output test"}),
-                 ("shell.output", {"output_id": "a" * 32})]
-        for cap in ("files.copy", "files.move"):
-            cases.append((cap, {"root": "workspace", "relative_path": "x.txt", "destination_root": "workspace",
-                                "destination_path": "y.txt", "expected_sha256": "a" * 64}))
-        for capability, args in cases:
-            for approval in (False, "true", 1):
-                with self.subTest(capability=capability, approval=approval), patch.object(worker.registry, "dispatch") as dispatch:
-                    result = worker.handle({"version": 1, "operation": "execute", "id": "deny",
-                        "device_id": worker.local.device.device_id, "capability": capability,
-                        "arguments": args, "confirmed": approval, "deadline": time.time() + 10})
+
+        cases = [
+            (
+                "files.info",
+                {
+                    "root": "workspace",
+                    "relative_path": "x.txt",
+                },
+            ),
+            (
+                "files.read_text",
+                {
+                    "root": "workspace",
+                    "relative_path": "x.txt",
+                },
+            ),
+            (
+                "files.write_text",
+                {
+                    "root": "workspace",
+                    "relative_path": "x.txt",
+                    "content": "x",
+                },
+            ),
+            (
+                "shell.powershell",
+                {
+                    "root": "workspace",
+                    "command": "Write-Output test",
+                },
+            ),
+            (
+                "shell.output",
+                {
+                    "output_id": "a" * 32,
+                },
+            ),
+        ]
+
+        for capability in ("files.copy", "files.move"):
+            cases.append((
+                capability,
+                {
+                    "root": "workspace",
+                    "relative_path": "x.txt",
+                    "destination_root": "workspace",
+                    "destination_path": "y.txt",
+                    "expected_sha256": "a" * 64,
+                },
+            ))
+
+        # confirmed must be an actual bool.
+        for index, (capability, args) in enumerate(cases):
+            for approval in ("true", 1, None):
+                with self.subTest(
+                    capability=capability,
+                    approval=approval,
+                ), patch.object(
+                    worker.registry,
+                    "dispatch",
+                ) as dispatch:
+                    result = worker.handle({
+                        "version": 1,
+                        "operation": "execute",
+                        "id": f"typed-{index}-{approval!r}",
+                        "device_id": worker.local.device.device_id,
+                        "capability": capability,
+                        "arguments": args,
+                        "confirmed": approval,
+                        "deadline": time.time() + 10,
+                    })
+
                     self.assertFalse(result["ok"])
                     dispatch.assert_not_called()
+
+        # These are routine user-directed reads.
+        routine = (
+            (
+                "files.info",
+                {
+                    "root": "workspace",
+                    "relative_path": "x.txt",
+                },
+            ),
+            (
+                "files.read_text",
+                {
+                    "root": "workspace",
+                    "relative_path": "x.txt",
+                },
+            ),
+        )
+
+        for index, (capability, args) in enumerate(routine):
+            with self.subTest(capability=capability), patch.object(
+                worker.registry,
+                "dispatch",
+                return_value={"ok": True},
+            ) as dispatch:
+                result = worker.handle({
+                    "version": 1,
+                    "operation": "execute",
+                    "id": f"routine-read-{index}",
+                    "device_id": worker.local.device.device_id,
+                    "capability": capability,
+                    "arguments": args,
+                    "confirmed": False,
+                    "deadline": time.time() + 10,
+                })
+
+                self.assertTrue(result["ok"])
+                dispatch.assert_called_once()
+
+        confirmation_bound = [
+            item
+            for item in cases
+            if item[0] not in {
+                "files.info",
+                "files.read_text",
+            }
+        ]
+
+        for index, (capability, args) in enumerate(
+            confirmation_bound
+        ):
+            with self.subTest(capability=capability), patch.object(
+                worker.registry,
+                "dispatch",
+            ) as dispatch:
+                result = worker.handle({
+                    "version": 1,
+                    "operation": "execute",
+                    "id": f"deny-bound-{index}",
+                    "device_id": worker.local.device.device_id,
+                    "capability": capability,
+                    "arguments": args,
+                    "confirmed": False,
+                    "deadline": time.time() + 10,
+                })
+
+                self.assertFalse(result["ok"])
+                dispatch.assert_not_called()
 
     def test_schema_rejects_overlong_content_command_and_offsets(self):
         registry = build_local_registry()

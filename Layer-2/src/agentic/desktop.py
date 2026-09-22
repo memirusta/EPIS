@@ -646,7 +646,11 @@ class WindowController:
                 elif len(new_rows) == 1:
                     chosen = new_rows[0]
 
-            if chosen is None and process_query and foreground != before_foreground:
+            # An already-running target may already be foreground before
+            # launch_discovered_app. A concrete foreground HWND whose process
+            # exactly matches the target is verified evidence even when no
+            # foreground transition occurs.
+            if chosen is None and process_query and foreground:
                 focused_match = next(
                     (
                         row
@@ -862,6 +866,28 @@ def register_desktop_tools(registry):
             timeout_seconds=8,
         )
         window = correlation.get("window")
+
+        # Start-menu apps can already be running without producing a new HWND
+        # or a foreground transition. Bind only if exactly one visible candidate
+        # matches the selected canonical app name.
+        if window is None:
+            existing = windows.list_windows({
+                "app_name": entry.name,
+            })
+            candidates = existing.get("windows") or []
+
+            if len(candidates) == 1:
+                window = candidates[0]
+                correlation = {
+                    "ok": True,
+                    "status": "window_correlated_existing_unique",
+                    "window": window,
+                    "selection_ttl_seconds": existing.get(
+                        "selection_ttl_seconds",
+                        120,
+                    ),
+                }
+
         result = dict(result)
         result["window_correlation"] = correlation.get("status")
         result["window"] = window

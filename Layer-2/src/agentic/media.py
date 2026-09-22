@@ -123,6 +123,33 @@ def register_media_tools(registry):
         schema({"session_id": {"type": "string", "maxLength": 32}, "app_id": {"type": "string", "maxLength": 512},
                 "action": {"type": "string", "enum": ["play", "pause", "next", "previous"]}}, ("session_id", "app_id", "action")),
         "media.control"), lambda args: controller.run("control", args))
-    registry.register(ToolSpec("search_spotify", "Open Spotify web search in the browser. Does NOT select a track or start playback. Use for named-song requests and disclose this limit.",
-        schema({"query": {"type": "string", "maxLength": 200}}, ("query",)), "media.spotify_search", "yellow", True,
-        confirmation_notice="Arama metni Spotify'a gönderilecek; parça seçilmez ve otomatik çalınmaz."), spotify_search)
+    registry.register(
+        ToolSpec(
+            "search_spotify",
+            (
+                "Open Spotify web search in the browser. "
+                "Does NOT select a track or start playback."
+            ),
+            schema(
+                {
+                    "query": {
+                        "type": "string",
+                        "maxLength": 200,
+                    }
+                },
+                ("query",),
+            ),
+            "media.spotify_search",
+            "yellow",
+            True,
+            confirmation_notice=(
+                "Arama metni Spotify'a gönderilecek; "
+                "parça seçilmez ve otomatik çalınmaz."
+            ),
+            model_visible=False,
+        ),
+        spotify_search,
+    )
+
+    # Browser-only Spotify search intentionally stays hidden from Luna.
+    # Named-track playback uses spotify_search_tracks -> spotify_play_track.

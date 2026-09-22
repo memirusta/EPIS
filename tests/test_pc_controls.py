@@ -83,7 +83,7 @@ class MediaTests(unittest.TestCase):
         backend, control, args = self.setup_media()
         backend.change = False
         result = control.run("control", {**args, "action": "pause"})
-        self.assertTrue(result["accepted"])
+        self.assertTrue(result["command_accepted"])
         self.assertFalse(result["state_verified"])
         self.assertFalse(control.run("control", {**args, "action": "next"})["state_verified"])
 
@@ -100,7 +100,8 @@ class MediaTests(unittest.TestCase):
             result = spotify_search({"query": "Manifest / Snap?x=#"})
             self.assertTrue(result["ok"])
             self.assertEqual(start.call_args.args[0], "https://open.spotify.com/search/Manifest%20%2F%20Snap%3Fx%3D%23")
-            self.assertIn("no track selected", result["message"])
+            self.assertFalse(result["track_selected"])
+            self.assertFalse(result["playback_started"])
             self.assertFalse(spotify_search({"query": "bad\ntext"})["ok"])
 
 
@@ -211,25 +212,89 @@ class SystemTests(unittest.TestCase):
 
     def test_new_risks_and_schema_bounds(self):
         registry = build_local_registry()
-        for name in ("list_media_sessions", "search_spotify", "list_folder", "open_folder", "create_workspace_folder", "open_settings", "lock_screen"):
-            self.assertTrue(PermissionEngine().decide(registry.get(name)[0], {}).requires_confirmation)
+        for name in ("create_workspace_folder", "lock_screen"):
+            self.assertTrue(
+                PermissionEngine().decide(
+                    registry.get(name)[0],
+                    {},
+                ).requires_confirmation
+            )
+
+        for name in (
+            "list_media_sessions",
+            "search_spotify",
+            "list_folder",
+            "open_folder",
+            "open_settings",
+        ):
+            self.assertFalse(
+                PermissionEngine().decide(
+                    registry.get(name)[0],
+                    {},
+                ).requires_confirmation
+            )
         for name, args in (("set_brightness", {"level": 0}), ("set_brightness", {"level": True}),
                            ("set_mute", {"state": "toggle"}), ("create_workspace_folder", {"name": "x", "root": "desktop"}),
                            ("list_folder", {"root": "C:\\Windows"})):
             self.assertFalse(registry.dispatch(name, args)["ok"])
 
-    def test_worker_denies_new_yellow_actions_without_confirmation(self):
+    def test_worker_enforces_current_confirmation_policy(self):
         worker = DeviceWorker()
         import time
-        for capability, args in (("system.lock", {}), ("files.list", {"root": "documents"}),
-                                 ("media.sessions", {}), ("files.create_folder", {"name": "NeverCreated"})):
-            with patch.object(worker.registry, "dispatch") as dispatch:
-                result = worker.handle({"version": 1, "operation": "execute", "id": "deny",
-                    "device_id": worker.local.device.device_id, "capability": capability,
-                    "arguments": args, "confirmed": False, "deadline": time.time()+10})
+
+        confirmation_bound = (
+            ("system.lock", {}),
+            (
+                "files.create_folder",
+                {"name": "NeverCreated"},
+            ),
+        )
+
+        for index, (capability, args) in enumerate(
+            confirmation_bound
+        ):
+            with self.subTest(capability=capability), patch.object(
+                worker.registry,
+                "dispatch",
+            ) as dispatch:
+                result = worker.handle({
+                    "version": 1,
+                    "operation": "execute",
+                    "id": f"deny-{index}",
+                    "device_id": worker.local.device.device_id,
+                    "capability": capability,
+                    "arguments": args,
+                    "confirmed": False,
+                    "deadline": time.time() + 10,
+                })
+
                 self.assertFalse(result["ok"])
                 dispatch.assert_not_called()
 
+        routine = (
+            ("files.list", {"root": "documents"}),
+            ("media.sessions", {}),
+        )
+
+        for index, (capability, args) in enumerate(routine):
+            with self.subTest(capability=capability), patch.object(
+                worker.registry,
+                "dispatch",
+                return_value={"ok": True},
+            ) as dispatch:
+                result = worker.handle({
+                    "version": 1,
+                    "operation": "execute",
+                    "id": f"routine-{index}",
+                    "device_id": worker.local.device.device_id,
+                    "capability": capability,
+                    "arguments": args,
+                    "confirmed": False,
+                    "deadline": time.time() + 10,
+                })
+
+                self.assertTrue(result["ok"])
+                dispatch.assert_called_once()
 
 if __name__ == "__main__":
     unittest.main()

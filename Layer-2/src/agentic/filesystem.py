@@ -38,6 +38,30 @@ IGNORED_DIRECTORY_NAMES = {
 }
 
 
+PROTECTED_METADATA_NAMES = frozenset({
+    ".env",
+    "keys.env",
+    "credentials.json",
+    "credential.json",
+    "secrets.json",
+    "passwords.txt",
+    "id_rsa",
+    "id_ed25519",
+    "id_dsa",
+    "id_ecdsa",
+})
+
+
+def protected_metadata_name(value: str) -> bool:
+    name = str(value or "").casefold()
+
+    return (
+        name in PROTECTED_METADATA_NAMES
+        or name.startswith(".env.")
+        or "private_key" in name
+    )
+
+
 def parts(relative):
     """Validate a relative path used with one of the legacy known roots."""
     if not relative:
@@ -63,6 +87,7 @@ def parts(relative):
             or len(name) > 100
             or any(ord(c) < 32 or c in '<>:"|?*' for c in name)
             or name.split(".")[0].upper() in RESERVED
+            or protected_metadata_name(name)
         ):
             raise ValueError("Invalid or protected path component")
 
@@ -232,6 +257,9 @@ class FolderTools:
                         | stat.FILE_ATTRIBUTE_HIDDEN
                         | stat.FILE_ATTRIBUTE_SYSTEM
                     ):
+                        continue
+
+                    if protected_metadata_name(entry.name):
                         continue
 
                     if (
