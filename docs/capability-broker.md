@@ -89,6 +89,30 @@ There is deliberately **no fixed total action-count or wall-clock limit** in the
 architecture. Bounded action batches and screenshot frame sizes protect the
 transport; workflow stopping is state-based.
 
+### Authorization and verified side effects
+
+Computer Use authorization is intent-aware but remains Core-owned.
+
+- `explicit_current_turn`: when the user's current message directly asks for the
+  semantic action, EPIS does not ask the same question a second time.
+- `session_category_grant`: confirming a grantable category lets related
+  user-directed actions continue for the current conversation. `/new` clears
+  these grants.
+- `assistant_proposed`: if EPIS expands the request with a new consequential
+  action, it pauses and asks what it plans to do before executing it.
+- explicit user denial overrides any session grant.
+- credential entry, payments/purchases, privileged security/elevation and
+  destructive changes remain separately confirmation-bound and are not granted
+  for the session.
+
+A session grant never turns an unrelated user message into permission for a new
+side effect. The current message still has to be relevant to that category.
+
+Computer Use completion is verification-bound. The visual sub-agent must inspect
+a post-action screenshot and return `VERIFIED:` only when the latest screen
+visibly proves the goal. `UNVERIFIED:` or a missing verification marker is
+returned to Core as an unverified failure rather than a success.
+
 ### Connectors / MCP
 
 Trusted connector configuration belongs to the host, never Luna. The semantic

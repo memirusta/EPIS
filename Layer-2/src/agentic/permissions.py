@@ -44,6 +44,8 @@ AUTO_CONFIRM_CAPABILITIES = frozenset({
     "ui.hotkey",
     "ui.scroll",
     "ui.wait",
+    # Direct visual observation is read-only and user-directed.
+    "computer.observe",
     # Hidden Computer Use primitives; semantic computer.execute is confirmed once.
     "computer.capture",
     "computer.actions",

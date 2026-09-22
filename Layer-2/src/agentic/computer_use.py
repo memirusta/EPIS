@@ -295,6 +295,100 @@ class CoreComputerBridge:
         )
 
 
+    def store_observation(
+        self,
+        session: dict,
+        frame: dict,
+        *,
+        observation_goal: str,
+        view: str,
+    ) -> str:
+        return self.core._store_visual_observation(
+            frame,
+            session=session,
+            observation_goal=observation_goal,
+            view=view,
+        )
+
+
+class DirectLunaObservationProvider:
+    # Read-only visual bridge: Luna itself receives and interprets the frame.
+
+    provider_id = "core-computer-observation"
+    display_name = "Direct Luna Visual Observation"
+    priority = 10
+
+    def __init__(self, bridge: CoreComputerBridge):
+        self.bridge = bridge
+
+    def available(self) -> bool:
+        return self.bridge.available()
+
+    def capabilities(self) -> set[str]:
+        return {"computer.observe"} if self.available() else set()
+
+    def close(self) -> None:
+        return None
+
+    def execute(self, capability: str, arguments: dict) -> dict:
+        if capability != "computer.observe":
+            return {"ok": False, "error": "capability_not_supported"}
+
+        goal = str(arguments.get("observation_goal") or "").strip()
+        target_app = str(arguments.get("target_app") or "").strip() or None
+        view = str(arguments.get("view") or "current").strip().lower()
+
+        if not goal:
+            return {"ok": False, "error": "computer_observation_goal_is_empty"}
+        if view not in {"current", "earlier", "later"}:
+            return {"ok": False, "error": "computer_observation_view_invalid"}
+
+        session, error = self.bridge.prepare(target_app)
+        if error:
+            return error
+
+        if view != "current":
+            before = self.bridge.capture(session)
+            if not before.get("ok"):
+                return before
+            moved = self.bridge.apply_actions(
+                session,
+                before,
+                [{
+                    "type": "keypress",
+                    "keys": ["PAGEUP" if view == "earlier" else "PAGEDOWN"],
+                }],
+            )
+            if not moved.get("ok"):
+                return moved
+
+        frame = self.bridge.capture(session)
+        if not frame.get("ok"):
+            return frame
+
+        observation_id = self.bridge.store_observation(
+            session,
+            frame,
+            observation_goal=goal,
+            view=view,
+        )
+
+        return {
+            "ok": True,
+            "status": "computer_observation",
+            "observation_id": observation_id,
+            "source_app": session["app_name"],
+            "target_app": target_app,
+            "view": view,
+            "observation_goal": goal,
+            "frame_id": frame.get("frame_id"),
+            "width": frame.get("width"),
+            "height": frame.get("height"),
+            "image_attached_to_luna": True,
+            "interpretation_delegated": False,
+        }
+
+
 class OpenAIComputerUseProvider:
     provider_id = "openai-computer"
     display_name = "OpenAI Computer Use"
@@ -438,8 +532,14 @@ class OpenAIComputerUseProvider:
                 "approve UAC/elevation, change security settings, purchase, "
                 "delete data, or take a consequential action that is not "
                 "explicitly requested. If the task becomes blocked, stop and "
-                "briefly explain why. When the goal is visually complete, stop "
-                "calling the computer tool."
+                "briefly explain why. After every mutating action you will receive "
+                "a fresh screenshot. For send/submit/publish goals, do not stop just "
+                "because you clicked a control: inspect the post-action screenshot "
+                "and verify that the content visibly left the draft/composer or "
+                "appeared in the destination. When you stop calling the computer "
+                "tool, your final text MUST start with VERIFIED: only if the latest "
+                "screenshot visibly proves the requested goal is complete. Otherwise "
+                "start with UNVERIFIED: and briefly explain what is not confirmed."
             ),
             input=history,
         )
@@ -598,10 +698,38 @@ class OpenAIComputerUseProvider:
                             "response_status": status,
                         }
 
+                    verified_prefix = "VERIFIED:"
+                    unverified_prefix = "UNVERIFIED:"
+                    upper_text = text.upper()
+
+                    if upper_text.startswith(unverified_prefix):
+                        return {
+                            "ok": False,
+                            "status": "computer_goal_unverified",
+                            "error": "computer_goal_not_visually_verified",
+                            "answer": text[len(unverified_prefix):].strip(),
+                            "model_used": self.model,
+                            "target_app": target_app,
+                            "action_batches": action_batches,
+                            "visual_completion_reported": False,
+                        }
+
+                    if not upper_text.startswith(verified_prefix):
+                        return {
+                            "ok": False,
+                            "status": "computer_goal_unverified",
+                            "error": "computer_model_missing_verification_marker",
+                            "answer": text,
+                            "model_used": self.model,
+                            "target_app": target_app,
+                            "action_batches": action_batches,
+                            "visual_completion_reported": False,
+                        }
+
                     return {
                         "ok": True,
                         "status": "computer_goal_completed",
-                        "answer": text,
+                        "answer": text[len(verified_prefix):].strip(),
                         "model_used": self.model,
                         "target_app": target_app,
                         "action_batches": action_batches,

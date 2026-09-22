@@ -140,7 +140,7 @@ class ComputerUseProviderTests(unittest.TestCase):
             }]),
             FakeResponse(
                 [],
-                text="Goal complete.",
+                text="VERIFIED: Goal complete.",
             ),
         ])
         provider = OpenAIComputerUseProvider(
@@ -183,6 +183,33 @@ class ComputerUseProviderTests(unittest.TestCase):
                 if isinstance(item, dict)
             )
         )
+
+    def test_unverified_completion_fails_closed(self):
+        bridge = FakeBridge()
+        client = FakeClient([
+            FakeResponse([{
+                "type": "computer_call",
+                "call_id": "screen",
+                "actions": [{"type": "screenshot"}],
+            }]),
+            FakeResponse(
+                [],
+                text="UNVERIFIED: submission was not visible.",
+            ),
+        ])
+        provider = OpenAIComputerUseProvider(
+            bridge,
+            api_key="test",
+            client_factory=lambda: client,
+        )
+
+        result = provider.execute(
+            "computer.execute",
+            {"goal": "Send the drafted message and verify it."},
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "computer_goal_unverified")
+        self.assertFalse(result["visual_completion_reported"])
 
     def test_model_cannot_act_before_first_screenshot(self):
         bridge = FakeBridge()

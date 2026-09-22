@@ -64,6 +64,44 @@ class FakeProvider:
         return None
 
 
+class FakeComputerProvider:
+    provider_id = "computer-test"
+    display_name = "Computer Test"
+    priority = 1
+
+    def __init__(self):
+        self.calls = []
+
+    def available(self):
+        return True
+
+    def capabilities(self):
+        return {"computer.execute"}
+
+    def execute(self, capability, arguments):
+        self.calls.append((capability, dict(arguments)))
+        return {
+            "ok": True,
+            "status": "computer_goal_completed",
+            "visual_completion_reported": True,
+        }
+
+    def close(self):
+        return None
+
+
+def computer_broker(provider):
+    broker = CapabilityBroker()
+    spec = next(
+        item
+        for item in default_capability_specs()
+        if item.name == "computer_execute_goal"
+    )
+    broker.register_spec(spec)
+    broker.register_provider(provider)
+    return broker
+
+
 def broker_with(*providers):
     broker = CapabilityBroker()
     broker.register_spec(
@@ -91,6 +129,52 @@ class CapabilityBrokerTests(unittest.TestCase):
         self.assertTrue(spec.confirmation_required)
         self.assertEqual(spec.risk_class, "yellow")
         self.assertNotIn("coordinate", spec.schema["properties"])
+
+    def test_explicit_current_turn_skips_duplicate_computer_approval(self):
+        provider = FakeComputerProvider()
+        core = build_core([])
+        self.addCleanup(core.close)
+        core.capability_broker = computer_broker(provider)
+
+        turn = core._dispatch_broker(
+            ToolCall(
+                "send-now",
+                "computer_execute_goal",
+                {
+                    "goal": "Send the currently drafted message and verify it.",
+                    "target_app": "ChatGPT",
+                },
+            ),
+            False,
+            user_message="Mesajı da gönderir misin?",
+        )
+        self.assertFalse(turn.confirmation_required)
+        self.assertEqual(len(provider.calls), 1)
+
+    def test_assistant_proposed_send_still_requires_approval(self):
+        provider = FakeComputerProvider()
+        core = build_core([])
+        self.addCleanup(core.close)
+        core.capability_broker = computer_broker(provider)
+
+        turn = core._dispatch_broker(
+            ToolCall(
+                "send-proposed",
+                "computer_execute_goal",
+                {
+                    "goal": "Send a message to the project owner.",
+                    "target_app": "ChatGPT",
+                },
+            ),
+            False,
+            user_message="Bu bugı incele.",
+        )
+        self.assertTrue(turn.confirmation_required)
+        self.assertEqual(
+            turn.approval["authorization_category"],
+            "external_communication",
+        )
+        self.assertEqual(provider.calls, [])
 
     def test_only_live_provider_tools_are_exposed(self):
         unavailable = FakeProvider(

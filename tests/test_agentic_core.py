@@ -113,6 +113,13 @@ class AgentCoreTests(unittest.TestCase):
         self.assertEqual(confirmed.message, "Onayla bilgisayar durumunu kontrol ettim.")
         self.assertEqual(core.history[-1]["role"], "assistant")
 
+    def test_new_conversation_clears_session_authorization_grants(self):
+        core = build_core([])
+        core.authorization.grant("external_communication")
+        self.assertIn("external_communication", core.authorization.grants())
+        core.new_conversation()
+        self.assertEqual(core.authorization.grants(), set())
+
     def test_unknown_tool_is_not_dispatched(self):
         core = build_core([
             LunaReply(tool_calls=[ToolCall("call-3", "shell", {"command": "whoami"})]),
