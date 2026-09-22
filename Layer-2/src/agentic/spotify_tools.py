@@ -62,7 +62,7 @@ class SpotifyTokenStore:
         payload = json.dumps(
             value, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
-        _, encrypted = win32crypt.CryptProtectData(
+        encrypted = win32crypt.CryptProtectData(
             payload,
             "EPIS Spotify OAuth",
             None,
