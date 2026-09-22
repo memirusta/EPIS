@@ -513,32 +513,53 @@ class SpotifyController:
         }
 
     def devices(self, _arguments: dict) -> dict:
-        data, error = self._request("GET", "/me/player/devices")
+        data, error = self._request(
+            "GET",
+            "/me/player/devices",
+        )
         if error:
             return error
+
         self._prune()
         results = []
+
         for item in (data or {}).get("devices") or []:
             raw_id = item.get("id")
+
             if not isinstance(raw_id, str) or not raw_id:
                 continue
+
             ref = uuid.uuid4().hex
+
             public = {
                 "device_ref": ref,
                 "name": str(item.get("name") or ""),
                 "type": str(item.get("type") or ""),
                 "is_active": bool(item.get("is_active")),
-                "volume_percent": item.get("volume_percent"),
+                "is_restricted": bool(
+                    item.get("is_restricted")
+                ),
+                "volume_percent": item.get(
+                    "volume_percent"
+                ),
             }
+
             self.device_refs[ref] = (
                 self._now() + SELECTION_TTL_SECONDS,
-                {"id": raw_id, "public": public},
+                {
+                    "id": raw_id,
+                    "public": public,
+                },
             )
+
             results.append(public)
+
         return {
             "ok": True,
             "devices": results,
-            "selection_ttl_seconds": SELECTION_TTL_SECONDS,
+            "selection_ttl_seconds": (
+                SELECTION_TTL_SECONDS
+            ),
         }
 
     def current(self, _arguments: dict) -> dict:
@@ -582,45 +603,144 @@ class SpotifyController:
         return saved[1] if saved else None
 
     def play_track(self, arguments: dict) -> dict:
-        track = self._resolve_track(arguments["track_ref"])
+        track = self._resolve_track(
+            arguments["track_ref"]
+        )
+
         if track is None:
             return {
                 "ok": False,
-                "error": "spotify_track_selection_expired",
+                "error": (
+                    "spotify_track_selection_expired"
+                ),
             }
-        device = self._resolve_device(arguments.get("device_ref"))
-        if device is None:
-            return {
-                "ok": False,
-                "error": "spotify_device_selection_expired",
-            }
-        params = {"device_id": device["id"]} if device.get("id") else None
+
+        device_ref = arguments.get("device_ref")
+
+        if device_ref:
+            device = self._resolve_device(device_ref)
+
+            if device is None:
+                return {
+                    "ok": False,
+                    "error": (
+                        "spotify_device_selection_expired"
+                    ),
+                }
+
+        else:
+            listing = self.devices({})
+
+            if not listing.get("ok"):
+                return listing
+
+            controllable = [
+                item
+                for item in listing.get(
+                    "devices",
+                    [],
+                )
+                if not item.get("is_restricted")
+            ]
+
+            active = next(
+                (
+                    item
+                    for item in controllable
+                    if item.get("is_active")
+                ),
+                None,
+            )
+
+            if active is not None:
+                selected = active
+
+            elif len(controllable) == 1:
+                # No active playback exists, but there is
+                # exactly one safe Spotify Connect target.
+                selected = controllable[0]
+
+            elif not controllable:
+                return {
+                    "ok": False,
+                    "error": (
+                        "spotify_no_controllable_device"
+                    ),
+                }
+
+            else:
+                # Multiple inactive devices: do not guess.
+                # Luna receives only opaque refs and public
+                # device metadata.
+                return {
+                    "ok": False,
+                    "error": (
+                        "spotify_device_selection_required"
+                    ),
+                    "devices": controllable,
+                    "selection_ttl_seconds": (
+                        listing.get(
+                            "selection_ttl_seconds"
+                        )
+                    ),
+                }
+
+            device = self._resolve_device(
+                selected["device_ref"]
+            )
+
+            if device is None:
+                return {
+                    "ok": False,
+                    "error": (
+                        "spotify_device_selection_expired"
+                    ),
+                }
+
         _, error = self._request(
             "PUT",
             "/me/player/play",
-            params=params,
-            json_body={"uris": [track["uri"]]},
+            params={
+                "device_id": device["id"],
+            },
+            json_body={
+                "uris": [track["uri"]],
+            },
         )
+
         if error and not error.get("ok"):
             return error
 
         verified = False
         observed = None
+
         for _ in range(4):
             time.sleep(0.25)
-            data, read_error = self._request("GET", "/me/player")
+
+            data, read_error = self._request(
+                "GET",
+                "/me/player",
+            )
+
             if read_error:
                 break
+
             if not data:
                 continue
+
             item = data.get("item") or {}
+
             observed = {
-                "is_playing": bool(data.get("is_playing")),
+                "is_playing": bool(
+                    data.get("is_playing")
+                ),
                 "uri": item.get("uri"),
             }
+
             if (
                 observed["is_playing"]
-                and observed["uri"] == track["uri"]
+                and observed["uri"]
+                == track["uri"]
             ):
                 verified = True
                 break
@@ -633,6 +753,7 @@ class SpotifyController:
                 else "playback_requested_unverified"
             ),
             "track": track["public"],
+            "device": device.get("public"),
             "state_verified": verified,
         }
 
@@ -776,9 +897,11 @@ def register_spotify_tools(registry):
         ToolSpec(
             "spotify_play_track",
             (
-                "Play an exact track_ref returned by spotify_search_tracks, "
-                "optionally on a device_ref returned by spotify_devices. "
-                "The tool verifies playback when Spotify reports state in time."
+                "Play an exact track_ref returned by spotify_search_tracks. "
+                "A returned device_ref may select a specific Spotify Connect "
+                "device. If omitted, Core safely uses the active device or the "
+                "sole controllable device; multiple inactive devices require "
+                "explicit selection. Playback is verified when possible."
             ),
             schema(
                 {
