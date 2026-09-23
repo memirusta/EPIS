@@ -22,6 +22,7 @@ from .path_grants import PersistentPathGrantStore
 from .tasks import TaskStore
 from .tools import ToolRegistry
 from .transport import DeviceTransport
+from .voice import build_voice_guidance
 
 
 logger = logging.getLogger("EPIS.AGENT")
@@ -812,6 +813,8 @@ class AgentCore:
                 "Desteklenmeyen işlemi desteklenmiş sayma."
             )
         )
+
+        system += "\n\n" + build_voice_guidance(user_message)
 
         live_manifest = self._live_capability_manifest()
         system += (
