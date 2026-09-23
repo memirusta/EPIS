@@ -17,6 +17,7 @@ class VoiceProfile:
     energy: str
     brevity: str
     technical: bool = False
+    phatic: bool = False
 
 
 _TECHNICAL_MARKERS = (
@@ -145,6 +146,7 @@ def classify_voice(user_message: str) -> VoiceProfile:
         energy=energy,
         brevity=brevity,
         technical=technical,
+        phatic=phatic,
     )
 
 
@@ -172,8 +174,15 @@ def build_voice_guidance(user_message: str) -> str:
         ),
         (
             "Samimiyet performansı yapma: argoyu mekanik biçimde kopyalama, her "
-            "mesajda 'aga/kanka/aynen' kullanma, aşırı emoji veya yapay coşku ekleme. "
-            "Ama doğal yerde kısa filler, gündelik ifade ve kuru mizah serbest."
+            "mesajda 'aga/kanka/aynen' kullanma. Ama kullanıcı yüksek enerjideyse "
+            "kısa süre aynı enerjiye çıkmak, doğal caps parçası, kahkaha veya 1-2 emoji "
+            "kullanmak serbest. Sonra normal ritme dön. Kuru mizah doğal yerde serbest."
+        ),
+        (
+            "Geçmiş bağlamı yalnızca gerçekten ilgiliyse kullan. Sırf hafızan varmış gibi "
+            "göstermek için eski test etiketlerini, URL'leri, teknik ayrıntıları veya önceki "
+            "konuları küçük sohbete taşıma. Kullanıcı konuya gönderme yapmadıysa alakasız "
+            "callback üretme."
         ),
     ]
 
@@ -182,6 +191,12 @@ def build_voice_guidance(user_message: str) -> str:
             "Günlük sohbet: arkadaşça ve akıcı konuş. Tek cümle yetiyorsa tek cümle. "
             "Mesaj sosyal ise onu görev/tavsiye listesine çevirmek zorunda değilsin."
         )
+        if profile.phatic:
+            lines.append(
+                "Bu bir selam/küçük sohbet turu. Önceki teknik bağlamı kendiliğinden açma; "
+                "yalnızca kullanıcı açıkça bağladıysa getir. Örnek ritim: 'Naber?' -> "
+                "'İyi ya 😄 Sen?' gibi kısa ve o ana ait bir cevap. Örneği ezberleme."
+            )
     elif profile.mode == "technical":
         lines.append(
             "Teknik tur: sonucu/teşhisi başa koy, sonra gerekli kanıtı veya adımı ver. "
@@ -201,8 +216,10 @@ def build_voice_guidance(user_message: str) -> str:
 
     if profile.energy == "high":
         lines.append(
-            "Kullanıcı heyecanlı: enerjiyi bir kademe aşağıdan karşıla. Kısa bir doğal "
-            "tepki olabilir; tamamını büyük harf, ünlem veya emoji yağmuruna çevirme."
+            "Kullanıcı heyecanlı: enerjiyi söndürme. Kısa süre aynı seviyeye çıkabilirsin; "
+            "bir kahkaha, kısa caps parçası veya 1-2 emoji gayet doğal. Ama cevabın tamamını "
+            "bağırmaya ya da emoji yağmuruna çevirme. Örnek ritim: 'AGA ÇALIŞTI LAN SONUNDA' "
+            "-> 'HAHA sonunda 😭 Bu sefer olmuş.' gibi. Örneği kelimesi kelimesine kopyalama."
         )
     elif profile.energy == "frustrated":
         lines.append(

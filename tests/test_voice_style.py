@@ -17,6 +17,7 @@ class VoiceClassifierTests(unittest.TestCase):
         profile = classify_voice("naber")
         self.assertEqual(profile.mode, "casual")
         self.assertEqual(profile.brevity, "short")
+        self.assertTrue(profile.phatic)
 
     def test_excited_turn_is_high_energy_without_forcing_mode(self):
         profile = classify_voice("CUUUUŞ OLDU LAN!!!")
@@ -50,6 +51,18 @@ class VoiceGuidanceTests(unittest.TestCase):
         self.assertIn("'Elbette'", guidance)
         self.assertIn("argoyu mekanik biçimde kopyalama", guidance)
         self.assertIn("1-3 kısa cümleyi geçme", guidance)
+
+    def test_phatic_guidance_does_not_drag_old_technical_context_in(self):
+        guidance = build_voice_guidance("Naber?")
+        self.assertIn("Önceki teknik bağlamı kendiliğinden açma", guidance)
+        self.assertIn("alakasız callback üretme", guidance)
+        self.assertIn("İyi ya 😄 Sen?", guidance)
+
+    def test_high_energy_guidance_allows_real_excitement(self):
+        guidance = build_voice_guidance("AGA ÇALIŞTI LAN SONUNDA")
+        self.assertIn("enerjiyi söndürme", guidance)
+        self.assertIn("Kısa süre aynı seviyeye çıkabilirsin", guidance)
+        self.assertIn("HAHA sonunda 😭 Bu sefer olmuş.", guidance)
 
     def test_technical_guidance_leads_with_diagnosis(self):
         guidance = build_voice_guidance("pytest fail veriyor")
@@ -100,6 +113,8 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("Voice yalnızca doğru içeriğin", voice)
         self.assertIn("Security ve authorization davranışı sınırlar; sesi belirlemez", voice)
         self.assertIn("müşteri hizmetleri", voice.casefold())
+        self.assertIn("Bağlamı göstermek için bağlam kullanma", voice)
+        self.assertIn("kısa süre aynı seviyeye", voice)
 
 
 if __name__ == "__main__":
