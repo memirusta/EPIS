@@ -83,6 +83,7 @@ class EpisClient {
               _reconnectAttempt = 0;
               onConnection(EpisConnectionStatus.online);
               _startOnlineTimers(generation);
+              requestConversationSync();
             }
             onPayload(payload);
           } catch (_) {
@@ -117,8 +118,6 @@ class EpisClient {
     );
 
     _deviceRefreshTimer?.cancel();
-    // Device connect/disconnect snapshots are pushed by the server.  This is
-    // only a low-frequency recovery poll for missed events.
     _deviceRefreshTimer = Timer.periodic(
       const Duration(seconds: 30),
       (_) => requestDevices(),
@@ -164,13 +163,18 @@ class EpisClient {
     }
   }
 
-  String? sendChat(String text) {
+  String? sendChat(
+    String text, {
+    List<ChatAttachment> attachments = const [],
+  }) {
     final requestId = _nextId('chat');
     final ok = send({
       'type': 'chat.send',
       'request_id': requestId,
       'origin_device_id': 'mobile:$_clientId',
       'text': text.trim(),
+      if (attachments.isNotEmpty)
+        'attachments': attachments.map((item) => item.toWire()).toList(),
     });
     return ok ? requestId : null;
   }
@@ -205,6 +209,11 @@ class EpisClient {
   }
 
   bool requestDevices() => send({'type': 'devices.get'});
+
+  bool requestConversationSync() => send({
+        'type': 'conversation.sync',
+        'request_id': _nextId('sync'),
+      });
 
   Future<void> disconnect() async {
     _manualDisconnect = true;

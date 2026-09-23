@@ -289,6 +289,14 @@ def _media_skip(direction: str) -> dict:
     }
 
 
+
+
+def _remote_phone_call_only(arguments: dict) -> dict:
+    return {
+        "ok": False,
+        "error": "phone.call requires a connected Android device",
+    }
+
 def _open_url(arguments: dict) -> dict:
     url = arguments["url"]
     try:
@@ -325,6 +333,45 @@ def build_local_registry() -> ToolRegistry:
                               {"type": "object", "properties": {"url": {"type": "string", "maxLength": 2048}, **device_property},
                                "required": ["url"], "additionalProperties": False},
                               "browser.open_url", RiskClass.YELLOW.value, True), _open_url)
+    phone_schema = {
+        "type": "object",
+        "properties": {
+            "number": {
+                "type": "string",
+                "maxLength": 40,
+                "description": "Phone number supplied by the user. Use either number or contact, never both.",
+            },
+            "contact": {
+                "type": "string",
+                "maxLength": 160,
+                "description": "Contact name to resolve locally on the Android phone. Contact phone numbers never leave the device.",
+            },
+            "device_id": {
+                "type": "string",
+                "description": "Optional registered Android phone device id.",
+            },
+        },
+        "additionalProperties": False,
+    }
+    registry.register(
+        ToolSpec(
+            "phone_call",
+            (
+                "Start a normal cellular call on a connected Android phone. "
+                "Use exactly one of number or contact. For contact names, resolution "
+                "happens locally on the phone and the saved phone number is not sent "
+                "to the cloud. Use only when the user explicitly asks to call someone."
+            ),
+            phone_schema,
+            "phone.call",
+            RiskClass.YELLOW.value,
+            True,
+            platforms=("android",),
+            confirmation_notice="Telefon araması başlatılacak.",
+            effects=("phone.call_requested",),
+        ),
+        _remote_phone_call_only,
+    )
     from .desktop import register_desktop_tools
     windows = register_desktop_tools(registry)
     from .computer_device import register_computer_device_tools

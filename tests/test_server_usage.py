@@ -87,6 +87,43 @@ class ServerUsageTests(unittest.TestCase):
                 {"system.info"},
             )
 
+
+    def test_device_hello_enforces_platform_specific_android_capabilities(self):
+        allowed = {
+            "windows": {"system.info"},
+            "android": {"phone.call"},
+        }
+        device = server_app.device_from_hello(
+            {
+                "type": "device.hello",
+                "version": 1,
+                "device": {
+                    "device_id": "android-1",
+                    "display_name": "Galaxy",
+                    "platform": "android",
+                    "capabilities": ["phone.call"],
+                },
+            },
+            allowed,
+        )
+        self.assertEqual(device.platform, "android")
+        self.assertEqual(device.capabilities, {"phone.call"})
+
+        with self.assertRaises(ValueError):
+            server_app.device_from_hello(
+                {
+                    "type": "device.hello",
+                    "version": 1,
+                    "device": {
+                        "device_id": "android-1",
+                        "display_name": "Galaxy",
+                        "platform": "android",
+                        "capabilities": ["system.info"],
+                    },
+                },
+                allowed,
+            )
+
     def test_usage_get_returns_a_snapshot_over_the_existing_websocket(self):
         expected = {
             "window": {"hours": 24, "from": "start", "to": "end"},

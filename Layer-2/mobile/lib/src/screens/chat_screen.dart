@@ -63,10 +63,32 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _send() {
     final value = _text.text.trim();
-    if (value.isEmpty) return;
+    if (value.isEmpty && widget.controller.pendingAttachments.isEmpty) return;
     if (widget.controller.sendMessage(value)) {
       _text.clear();
     }
+  }
+
+  String _attachmentSize(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(0)} KB';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+
+  Widget _attachmentChip(
+    ChatAttachmentSummary attachment, {
+    VoidCallback? onDeleted,
+  }) {
+    final isImage = attachment.mimeType.toLowerCase().startsWith('image/');
+    return InputChip(
+      avatar: Icon(isImage ? Icons.image_outlined : Icons.description_outlined, size: 16),
+      label: Text(
+        '${attachment.name} · ${_attachmentSize(attachment.sizeBytes)}',
+        overflow: TextOverflow.ellipsis,
+      ),
+      onDeleted: onDeleted,
+      visualDensity: VisualDensity.compact,
+    );
   }
 
   @override
@@ -155,6 +177,16 @@ class _ChatScreenState extends State<ChatScreen> {
                                     height: 1.45,
                                   ),
                                 ),
+                              if (message.attachments.isNotEmpty) ...[
+                                const SizedBox(height: 8),
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: message.attachments
+                                      .map((attachment) => _attachmentChip(attachment))
+                                      .toList(),
+                                ),
+                              ],
                               ...message.toolResults.map(
                                 (tool) => ExpansionTile(
                                   dense: true,
@@ -234,6 +266,24 @@ class _ChatScreenState extends State<ChatScreen> {
                 style: const TextStyle(color: Color(0xFFDF8888), fontSize: 11),
               ),
             ),
+          if (c.pendingAttachments.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    for (var i = 0; i < c.pendingAttachments.length; i++)
+                      _attachmentChip(
+                        c.pendingAttachments[i].summary,
+                        onDeleted: () => c.removeAttachment(i),
+                      ),
+                  ],
+                ),
+              ),
+            ),
           Padding(
             padding: EdgeInsets.fromLTRB(
               12,
@@ -245,9 +295,15 @@ class _ChatScreenState extends State<ChatScreen> {
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
                 IconButton(
-                  tooltip: 'Yeni bağlam',
-                  onPressed: online ? c.newConversation : null,
-                  icon: const Icon(Icons.add_comment_outlined),
+                  tooltip: 'Dosya ekle',
+                  onPressed: c.pickingAttachment ? null : c.pickAttachment,
+                  icon: c.pickingAttachment
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 1.6),
+                        )
+                      : const Icon(Icons.attach_file),
                 ),
                 Expanded(
                   child: TextField(

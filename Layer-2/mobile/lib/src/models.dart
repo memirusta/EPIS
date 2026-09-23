@@ -2,16 +2,96 @@ enum EpisConnectionStatus { connecting, online, offline }
 
 enum ChatRole { user, assistant }
 
+class ChatAttachmentSummary {
+  const ChatAttachmentSummary({
+    required this.name,
+    required this.mimeType,
+    required this.sizeBytes,
+  });
+
+  final String name;
+  final String mimeType;
+  final int sizeBytes;
+
+  static ChatAttachmentSummary? tryParse(Object? value) {
+    if (value is! Map) return null;
+    final map = Map<String, dynamic>.from(value);
+    final name = map['name'];
+    final mimeType = map['mime_type'];
+    final sizeBytes = map['size_bytes'];
+    if (name is! String || mimeType is! String || sizeBytes is! num) {
+      return null;
+    }
+    return ChatAttachmentSummary(
+      name: name,
+      mimeType: mimeType,
+      sizeBytes: sizeBytes.toInt(),
+    );
+  }
+}
+
+class ChatAttachment {
+  const ChatAttachment({
+    required this.name,
+    required this.mimeType,
+    required this.sizeBytes,
+    required this.dataBase64,
+  });
+
+  final String name;
+  final String mimeType;
+  final int sizeBytes;
+  final String dataBase64;
+
+  ChatAttachmentSummary get summary => ChatAttachmentSummary(
+        name: name,
+        mimeType: mimeType,
+        sizeBytes: sizeBytes,
+      );
+
+  Map<String, dynamic> toWire() => {
+        'name': name,
+        'mime_type': mimeType,
+        'size_bytes': sizeBytes,
+        'data_base64': dataBase64,
+      };
+
+  static ChatAttachment? tryParseNative(Map<String, dynamic> map) {
+    final name = map['name'];
+    final mimeType = map['mime_type'];
+    final sizeBytes = map['size_bytes'];
+    final dataBase64 = map['data_base64'];
+    if (name is! String ||
+        mimeType is! String ||
+        sizeBytes is! num ||
+        dataBase64 is! String ||
+        name.trim().isEmpty ||
+        dataBase64.isEmpty) {
+      return null;
+    }
+    return ChatAttachment(
+      name: name.trim(),
+      mimeType: mimeType.trim().isEmpty
+          ? 'application/octet-stream'
+          : mimeType.trim(),
+      sizeBytes: sizeBytes.toInt(),
+      dataBase64: dataBase64,
+    );
+  }
+}
+
 class ChatMessage {
   const ChatMessage({
     required this.role,
     required this.text,
     this.toolResults = const [],
+    this.attachments = const [],
   });
 
   final ChatRole role;
   final String text;
   final List<Map<String, dynamic>> toolResults;
+  final List<ChatAttachmentSummary> attachments;
 }
 
 class ApprovalRequest {
