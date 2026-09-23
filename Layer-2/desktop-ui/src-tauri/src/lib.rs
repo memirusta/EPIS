@@ -26,7 +26,7 @@ pub fn run() {
         .setup(move |app| {
             let state = app.state::<LocalServer>();
             if let Err(error) = state.start(app.handle()) {
-                eprintln!("EPIS local server/device agent could not start: {error}");
+                eprintln!("EPIS desktop runtime could not start: {error}");
             }
 
             let open_item = MenuItem::with_id(app, "open", "Open EPIS", true, None::<&str>)?;

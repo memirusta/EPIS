@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import threading
 
 
 def _now_utc() -> datetime:
@@ -37,6 +38,7 @@ class HotConversationStore:
         max_chars: int | None = None,
     ):
         self.path = Path(path)
+        self._lock = threading.RLock()
 
         # Backward-compatible constructor parameters from the old rolling-window
         # implementation. Session memory no longer trims by these limits.
@@ -61,14 +63,15 @@ class HotConversationStore:
             separators=(",", ":"),
         )
 
-        with self.path.open(
-            "a",
-            encoding="utf-8",
-        ) as stream:
-            stream.write(encoded)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
+        with self._lock:
+            with self.path.open(
+                "a",
+                encoding="utf-8",
+            ) as stream:
+                stream.write(encoded)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
 
     def append_turn(
         self,
@@ -83,23 +86,48 @@ class HotConversationStore:
             assistant_message or ""
         ).strip()
 
-        if user_message:
-            self._append(
-                {
-                    "type": "message",
-                    "role": "user",
-                    "content": user_message,
-                }
-            )
+        with self._lock:
+            if user_message:
+                self._append(
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": user_message,
+                    }
+                )
 
-        if assistant_message:
-            self._append(
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": assistant_message,
-                }
-            )
+            if assistant_message:
+                self._append(
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": assistant_message,
+                    }
+                )
+
+    def append_assistant_event(
+        self,
+        assistant_message: str,
+        *,
+        source: str = "internal_event",
+    ) -> None:
+        """Append an assistant-only event to the active shared session.
+
+        Proactive/Kairos events are machine-originated context, not user text.
+        Keeping only the generated EPIS message prevents internal trigger
+        instructions from polluting later conversation history.
+        """
+        content = (assistant_message or "").strip()
+        if not content:
+            return
+        self._append(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": content,
+                "source": str(source or "internal_event")[:80],
+            }
+        )
 
     def mark_new_conversation(self) -> None:
         """End the active session without deleting older raw session logs."""
@@ -117,23 +145,24 @@ class HotConversationStore:
         rows: list[dict] = []
 
         try:
-            with self.path.open(
-                "r",
-                encoding="utf-8",
-            ) as stream:
-                for line in stream:
-                    line = line.strip()
+            with self._lock:
+                with self.path.open(
+                    "r",
+                    encoding="utf-8",
+                ) as stream:
+                    for line in stream:
+                        line = line.strip()
 
-                    if not line:
-                        continue
+                        if not line:
+                            continue
 
-                    try:
-                        row = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
 
-                    if isinstance(row, dict):
-                        rows.append(row)
+                        if isinstance(row, dict):
+                            rows.append(row)
 
         except OSError:
             return []

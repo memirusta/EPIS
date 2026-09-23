@@ -4,8 +4,9 @@ Reading/inspection supports:
 - Legacy known roots: desktop / documents / downloads / workspace
 - Explicit absolute local Windows paths such as D:\\Projects\\nebula\\Cargo.toml
 
-Writing/copying/moving intentionally keeps the older known-root model.
-No overwrite or execution is performed.
+Reading and writing may use explicit absolute local paths. Existing files are
+replaced only when the caller supplies the SHA256 observed by a prior read/info call.
+No execution or deletion is performed.
 """
 
 import hashlib
@@ -98,6 +99,8 @@ PROTECTED_NAMES = {
     "id_ed25519",
     "id_dsa",
     "id_ecdsa",
+    "path-grants.json",
+    "permissions.json",
 }
 
 
@@ -154,28 +157,48 @@ class FileTools:
             )
 
     @staticmethod
-    def _absolute_file(value: str) -> Path:
+    def _reject_reparse_chain(target: Path):
+        current = target
+        while True:
+            if os.path.lexists(current):
+                info = os.lstat(current)
+                attrs = getattr(info, "st_file_attributes", 0)
+                if attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                    raise ValueError(
+                        "Reparse path components are not supported"
+                    )
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+
+    @classmethod
+    def _absolute_file(cls, value: str, *, allow_missing=False) -> Path:
         if not value or not isinstance(value, str):
             raise ValueError("Missing file path")
 
-        target = Path(value).expanduser()
-
-        if not target.is_absolute():
-            raise ValueError("Absolute Windows path required")
-
-        raw = str(target)
-
+        raw = value.strip()
         if raw.startswith(("\\\\", "//")):
             raise ValueError(
                 "Network/UNC files are not supported"
             )
 
-        try:
-            target = target.resolve(strict=True)
-        except FileNotFoundError as exc:
-            raise ValueError("File does not exist") from exc
+        target = Path(
+            os.path.abspath(
+                os.path.normpath(
+                    str(Path(raw).expanduser())
+                )
+            )
+        )
 
-        if not target.is_file():
+        if not target.is_absolute():
+            raise ValueError("Absolute Windows path required")
+
+        cls._reject_reparse_chain(target.parent)
+
+        if os.path.lexists(target):
+            cls._validate_existing_file(target)
+        elif not allow_missing:
             raise ValueError("File does not exist")
 
         return target
@@ -200,17 +223,14 @@ class FileTools:
         """
 
         if absolute_path:
-            if allow_missing:
-                raise ValueError(
-                    "Absolute paths are read-only in this tool version"
-                )
-
             target = self._absolute_file(
-                absolute_path
+                absolute_path,
+                allow_missing=allow_missing,
             )
 
             self._validate_name(target)
-            self._validate_existing_file(target)
+            if os.path.lexists(target):
+                self._validate_existing_file(target)
 
             return target
 
@@ -385,12 +405,10 @@ class FileTools:
         }
 
     def write(self, args):
-        # Yazma tarafı bilerek eski root + relative_path modeliyle sınırlı.
         target = self.path(
-            root=args["root"],
-            relative=args[
-                "relative_path"
-            ],
+            root=args.get("root"),
+            relative=args.get("relative_path"),
+            absolute_path=args.get("path"),
             allow_missing=True,
         )
 
@@ -398,32 +416,184 @@ class FileTools:
             "content"
         ].encode("utf-8")
 
-        if target.exists():
+        if len(data) > MAX_BYTES:
             return {
                 "ok": False,
-                "error": (
-                    "Destination exists; "
-                    "no overwrite. "
-                    "Choose a new file name."
-                ),
+                "error": "Content exceeds 1 MiB limit",
             }
 
-        with target.open(
-            "xb"
-        ) as stream:
+        self._reject_reparse_chain(target.parent)
+        target.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        self._reject_reparse_chain(target.parent)
+
+        if target.exists():
+            expected = str(
+                args.get("expected_sha256") or ""
+            ).casefold()
+            if len(expected) != 64:
+                return {
+                    "ok": False,
+                    "error": (
+                        "expected_sha256 is required when replacing "
+                        "an existing file"
+                    ),
+                }
+
+            _, current_digest = self.load(target)
+            if current_digest.casefold() != expected:
+                return {
+                    "ok": False,
+                    "error": (
+                        "Destination changed; inspect it again before writing"
+                    ),
+                    "current_sha256": current_digest,
+                }
+
+            temp = target.with_name(
+                f".{target.name}.{os.getpid()}.epis-tmp"
+            )
+            try:
+                with temp.open("xb") as stream:
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+
+                # Re-check immediately before the atomic replacement.
+                _, latest_digest = self.load(target)
+                if latest_digest.casefold() != expected:
+                    return {
+                        "ok": False,
+                        "error": (
+                            "Destination changed during write preparation; "
+                            "inspect it again"
+                        ),
+                        "current_sha256": latest_digest,
+                    }
+                os.replace(temp, target)
+            finally:
+                try:
+                    if temp.exists():
+                        temp.unlink()
+                except OSError:
+                    pass
+
+            digest = hashlib.sha256(data).hexdigest()
+            return {
+                "ok": True,
+                "status": "file_replaced",
+                "path": str(target),
+                "size_bytes": len(data),
+                "sha256": digest,
+            }
+
+        with target.open("xb") as stream:
             stream.write(data)
             stream.flush()
-            os.fsync(
-                stream.fileno()
-            )
+            os.fsync(stream.fileno())
 
         return {
             "ok": True,
+            "status": "file_created",
             "path": str(target),
             "size_bytes": len(data),
             "sha256": hashlib.sha256(
                 data
             ).hexdigest(),
+        }
+
+    def patch(self, args):
+        """Atomically replace one exact, unique text fragment in an existing file."""
+        target = self.path(
+            root=args.get("root"),
+            relative=args.get("relative_path"),
+            absolute_path=args.get("path"),
+        )
+
+        expected = str(args.get("expected_sha256") or "").casefold()
+        if len(expected) != 64:
+            return {
+                "ok": False,
+                "error": "expected_sha256 is required for patching",
+            }
+
+        old_text = args.get("old_text")
+        new_text = args.get("new_text")
+        if not isinstance(old_text, str) or not old_text:
+            return {"ok": False, "error": "old_text must be non-empty"}
+        if not isinstance(new_text, str):
+            return {"ok": False, "error": "new_text must be a string"}
+
+        data, current_digest = self.load(target)
+        if current_digest.casefold() != expected:
+            return {
+                "ok": False,
+                "error": "Source changed; inspect it again before patching",
+                "current_sha256": current_digest,
+            }
+
+        had_bom = data.startswith(b"\xef\xbb\xbf")
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return {"ok": False, "error": "Only UTF-8 text is supported"}
+        if "\x00" in text:
+            return {"ok": False, "error": "Binary content is not supported"}
+
+        match_count = text.count(old_text)
+        if match_count != 1:
+            return {
+                "ok": False,
+                "error": "patch_context_mismatch",
+                "match_count": match_count,
+            }
+
+        start = text.index(old_text)
+        updated = text[:start] + new_text + text[start + len(old_text):]
+        encoded = updated.encode("utf-8")
+        if had_bom:
+            encoded = b"\xef\xbb\xbf" + encoded
+        if len(encoded) > MAX_BYTES:
+            return {"ok": False, "error": "Patched file exceeds 1 MiB limit"}
+
+        temp = target.with_name(f".{target.name}.{os.getpid()}.epis-patch-tmp")
+        self._reject_reparse_chain(target.parent)
+        try:
+            with temp.open("xb") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+
+            # The source may have changed while Sol/Luna were preparing the edit.
+            _, latest_digest = self.load(target)
+            if latest_digest.casefold() != expected:
+                return {
+                    "ok": False,
+                    "error": "Source changed during patch preparation; inspect it again",
+                    "current_sha256": latest_digest,
+                }
+            os.replace(temp, target)
+        finally:
+            try:
+                if temp.exists():
+                    temp.unlink()
+            except OSError:
+                pass
+
+        new_digest = hashlib.sha256(encoded).hexdigest()
+        return {
+            "ok": True,
+            "status": "file_patched",
+            "path": str(target),
+            "old_sha256": current_digest,
+            "sha256": new_digest,
+            "changed": {
+                "start_character": start,
+                "old_characters": len(old_text),
+                "new_characters": len(new_text),
+            },
         }
 
     def transfer(
@@ -565,8 +735,8 @@ def register_file_tools(registry):
         },
     }
 
-    # WRITE / COPY / MOVE:
-    # Şimdilik eski kontrollü root modeli.
+    # COPY / MOVE keep the older controlled-root model.
+    # write_text_file uses read_location so an approved absolute path can be used.
     legacy_location = {
         "root": {
             "type": "string",
@@ -636,6 +806,7 @@ def register_file_tools(registry):
             "files.info",
             "yellow",
             True,
+            effects=("read",),
         ),
         files.info,
     )
@@ -669,6 +840,7 @@ def register_file_tools(registry):
             "yellow",
             True,
             confirmation_notice=disclosure,
+            effects=("read",),
         ),
         files.read,
     )
@@ -677,18 +849,22 @@ def register_file_tools(registry):
         ToolSpec(
             "write_text_file",
             (
-                "Create a NEW UTF-8 text/source "
-                "file inside a known root. "
-                "NEVER overwrites an existing "
-                "file. Absolute-path writing is "
-                "not enabled by this tool."
+                "Create or replace one UTF-8 text/source file. "
+                "Absolute local Windows paths are supported after Core path approval. "
+                "When replacing an existing file, expected_sha256 from the latest "
+                "get_file_info/read_text_file result is mandatory. Never deletes files."
             ),
-            legacy_schema(
+            read_schema(
                 {
                     "content": {
                         "type": "string",
-                        "maxLength": 6000,
-                    }
+                        "maxLength": MAX_BYTES,
+                    },
+                    "expected_sha256": {
+                        "type": "string",
+                        "minLength": 64,
+                        "maxLength": 64,
+                    },
                 },
                 ["content"],
             ),
@@ -696,12 +872,53 @@ def register_file_tools(registry):
             "red",
             True,
             confirmation_notice=(
-                "Gösterilen konumda yeni dosya "
-                "oluşturulacak; mevcut dosyanın "
-                "üzerine yazılmaz."
+                "Bu dosya oluşturulacak veya güncellenecek. Var olan dosya "
+                "yalnızca son okunan SHA256 hâlâ eşleşiyorsa atomik olarak değiştirilir."
             ),
+            effects=("write",),
         ),
         files.write,
+    )
+
+    registry.register(
+        ToolSpec(
+            "apply_text_patch",
+            (
+                "Edit an EXISTING UTF-8 text/source file by replacing one exact, "
+                "unique old_text fragment with new_text. Requires expected_sha256 "
+                "from the latest read/info result. Prefer this over rewriting an "
+                "entire existing source file. Fails without writing when the SHA or "
+                "patch context changed."
+            ),
+            read_schema(
+                {
+                    "expected_sha256": {
+                        "type": "string",
+                        "minLength": 64,
+                        "maxLength": 64,
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200000,
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "maxLength": 200000,
+                    },
+                },
+                ["expected_sha256", "old_text", "new_text"],
+            ),
+            "files.patch_text",
+            "red",
+            True,
+            confirmation_notice=(
+                "Var olan dosyada yalnızca gösterilen exact kaynak parçası "
+                "değiştirilecek; SHA veya bağlam değiştiyse işlem yapılmaz."
+            ),
+            effects=("write",),
+        ),
+        files.patch,
     )
 
     transfer = {
@@ -758,6 +975,7 @@ def register_file_tools(registry):
                     "Taşıma kaynak adını/konumunu "
                     "değiştirir; üzerine yazılmaz."
                 ),
+                effects=("read", "write"),
             ),
             lambda args, move=move: (
                 files.transfer(

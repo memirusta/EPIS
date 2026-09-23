@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import time
+import threading
 import uuid
 from typing import Any
 
@@ -17,6 +18,7 @@ from .devices import DeviceRegistry
 from .execution import ExecutionEngine
 from .luna import LunaClient, ToolCall
 from .permissions import PermissionEngine
+from .path_grants import PersistentPathGrantStore
 from .tasks import TaskStore
 from .tools import ToolRegistry
 from .transport import DeviceTransport
@@ -28,7 +30,12 @@ _SESSION_READ_CAPABILITIES = frozenset({
     "files.list",
     "files.info",
     "files.read_text",
+    "repository.inspect",
 })
+
+_BUDGET_FREE_CAPABILITIES = _SESSION_READ_CAPABILITIES
+_MAX_SIDE_EFFECT_CALLS_PER_TURN = 16
+_MAX_IDENTICAL_CALLS_PER_TURN = 3
 
 
 @dataclass
@@ -44,6 +51,13 @@ class PendingAction:
     approval_message: str = ""
     authorization_category: str = ""
     session_grant_on_confirm: bool = False
+    path_grant_root: str = ""
+    path_grant_permissions: tuple[str, ...] = ()
+    persistent_path_grant_on_confirm: bool = False
+    request_id: str = ""
+    client_id: str = ""
+    origin_device_id: str = ""
+    call_tasks: dict[str, str] = field(default_factory=dict)
     expires_at: float = field(
         default_factory=lambda: time.monotonic() + 120
     )
@@ -196,6 +210,7 @@ class AgentCore:
         usage_repository=None,
         execution: ExecutionEngine | None = None,
         capability_broker: CapabilityBroker | None = None,
+        path_grants=None,
     ):
         self.luna = luna
         self.system_prompt = system_prompt
@@ -217,7 +232,13 @@ class AgentCore:
         self.history: list[dict] = []
         self.restored_hot_messages = 0
 
-        self.pending: PendingAction | None = None
+        # Multiple user turns may be in flight at the same time. Pending
+        # approvals are keyed by approval id instead of replacing each other.
+        self._pending_actions: dict[str, PendingAction] = {}
+        self._active_turns: dict[str, dict[str, Any]] = {}
+        self._state_lock = threading.RLock()
+        self._task_lock = threading.RLock()
+        self._turn_local = threading.local()
 
         self.tasks = (
             tasks
@@ -229,6 +250,8 @@ class AgentCore:
             local_agent.device.device_id: local_agent
         }
 
+        # Backward-compatible debug view. Runtime task receipts are actually
+        # per-turn via thread-local storage so concurrent turns never reuse IDs.
         self._call_tasks: dict[str, str] = {}
 
         self._register_runtime_capability_providers()
@@ -240,8 +263,130 @@ class AgentCore:
         # Never persist these to Hot Memory.
         self._visual_observations: dict[str, dict] = {}
         self.authorization = SessionAuthorizationPolicy()
+        self.path_grants = (
+            path_grants
+            if path_grants is not None
+            else PersistentPathGrantStore()
+        )
 
         self._restore_hot_history()
+
+    @property
+    def pending(self):
+        """Backward-compatible pending view.
+
+        Legacy callers expect either ``None`` or one PendingAction.  Phase 2 can
+        keep several approvals alive at once, so when more than one exists the
+        property returns a shallow mapping instead of discarding any action.
+        New code should use pending_count()/pending_metadata().
+        """
+        with self._state_lock:
+            if not self._pending_actions:
+                return None
+            if len(self._pending_actions) == 1:
+                return next(iter(self._pending_actions.values()))
+            return dict(self._pending_actions)
+
+    def pending_count(self) -> int:
+        with self._state_lock:
+            return len(self._pending_actions)
+
+    def pending_metadata(self, approval_id: str | None) -> dict[str, Any] | None:
+        if not isinstance(approval_id, str) or not approval_id:
+            return None
+        with self._state_lock:
+            pending = self._pending_actions.get(approval_id)
+            if pending is None:
+                return None
+            return {
+                "approval_id": pending.approval_id,
+                "request_id": pending.request_id,
+                "client_id": pending.client_id,
+                "origin_device_id": pending.origin_device_id,
+                "expires_at": pending.expires_at,
+            }
+
+    def active_turns(self) -> list[dict[str, Any]]:
+        with self._state_lock:
+            return [
+                dict(value)
+                for value in self._active_turns.values()
+            ]
+
+    def public_devices(self) -> list[dict[str, Any]]:
+        self._online_capabilities()
+        with self._state_lock:
+            return list(
+                self.devices.list_public()
+            )
+
+    def _register_active_turn(
+        self,
+        request_id: str,
+        client_id: str,
+        origin_device_id: str,
+        user_message: str,
+    ) -> list[dict[str, Any]]:
+        with self._state_lock:
+            if request_id in self._active_turns:
+                raise ValueError("duplicate_request_id")
+            others = [
+                dict(value)
+                for key, value in self._active_turns.items()
+                if key != request_id
+            ]
+            self._active_turns[request_id] = {
+                "request_id": request_id,
+                "client_id": client_id,
+                "origin_device_id": origin_device_id,
+                "user_message": user_message,
+                "status": "running",
+                "started_at": time.time(),
+            }
+            return others
+
+    def _set_active_turn_status(self, request_id: str, status: str) -> None:
+        if not request_id:
+            return
+        with self._state_lock:
+            current = self._active_turns.get(request_id)
+            if current is not None:
+                current["status"] = status
+
+    def _finish_active_turn(self, request_id: str) -> None:
+        if not request_id:
+            return
+        with self._state_lock:
+            self._active_turns.pop(request_id, None)
+
+    def _set_turn_call_tasks(self, mapping: dict[str, str]) -> None:
+        self._turn_local.call_tasks = mapping
+        # Keep this only as a debug/backward-compatible view for the current
+        # thread. Runtime code reads _current_call_tasks().
+        self._call_tasks = mapping
+
+    def _current_call_tasks(self) -> dict[str, str]:
+        mapping = getattr(self._turn_local, "call_tasks", None)
+        if mapping is None:
+            mapping = {}
+            self._turn_local.call_tasks = mapping
+        return mapping
+
+    def _task_create(self, tool: str, device: str, state: str = "awaiting_confirmation") -> str:
+        with self._task_lock:
+            return self.tasks.create(tool, device, state=state)
+
+    def _task_claim(self, task_id: str) -> bool:
+        with self._task_lock:
+            return self.tasks.claim(task_id)
+
+    def _task_finish(self, task_id: str, state: str) -> None:
+        with self._task_lock:
+            self.tasks.finish(task_id, state)
+
+    def _task_recent(self):
+        with self._task_lock:
+            return self.tasks.recent()
 
     def _register_runtime_capability_providers(
         self,
@@ -397,6 +542,10 @@ class AgentCore:
             "authorization_category": approval.get("authorization_category"),
             "authorization_source": approval.get("authorization_source"),
             "session_grant_on_confirm": bool(approval.get("session_grant_on_confirm")),
+            "path_grant_root": approval.get("path_grant_root"),
+            "persistent_path_grant_on_confirm": bool(
+                approval.get("persistent_path_grant_on_confirm")
+            ),
         }
 
         try:
@@ -441,7 +590,12 @@ class AgentCore:
 
     def _online_capabilities(self) -> set[str]:
         """Refresh transports and return capabilities on live devices only."""
-        for transport in list(self.transports.values()):
+        with self._state_lock:
+            transports = list(
+                self.transports.values()
+            )
+
+        for transport in transports:
             try:
                 transport.refresh()
             except Exception as exc:
@@ -450,8 +604,13 @@ class AgentCore:
                     error=type(exc).__name__,
                 )
 
+        with self._state_lock:
+            public_devices = list(
+                self.devices.list_public()
+            )
+
         capabilities: set[str] = set()
-        for device in self.devices.list_public():
+        for device in public_devices:
             if not device.get("online"):
                 continue
             capabilities.update(device.get("capabilities") or [])
@@ -478,7 +637,11 @@ class AgentCore:
             })
 
         devices = []
-        for device in self.devices.list_public():
+        with self._state_lock:
+            public_devices = list(
+                self.devices.list_public()
+            )
+        for device in public_devices:
             if not device.get("online"):
                 continue
             devices.append({
@@ -496,14 +659,31 @@ class AgentCore:
     def handle(
         self,
         user_message: str,
+        request_id: str | None = None,
+        client_id: str | None = None,
+        origin_device_id: str | None = None,
     ) -> AgentTurn:
-        # A pending approval is independent from ordinary conversation.
-        # The user may keep chatting while the approval card remains visible.
-        # Keep the original task receipt mapping alive until that approval resolves.
-        if self.pending is None:
-            self._call_tasks = {}
+        request_id = (request_id or uuid.uuid4().hex).strip()
+        client_id = (client_id or "local").strip()
+        origin_device_id = (origin_device_id or client_id).strip()
+        if not request_id:
+            raise ValueError("request_id_required")
+        if not client_id:
+            raise ValueError("client_id_required")
 
-        self._refresh_hot_history()
+        # Snapshot shared conversation state only briefly. Model/tool execution
+        # itself stays outside this lock, allowing other clients to start turns.
+        with self._state_lock:
+            self._refresh_hot_history()
+            history_snapshot = list(self.history)
+            pending_count = len(self._pending_actions)
+            other_active = [
+                dict(value)
+                for value in self._active_turns.values()
+            ]
+
+        call_tasks: dict[str, str] = {}
+        self._set_turn_call_tasks(call_tasks)
 
         mode = os.getenv(
             "EPIS_LUNA_CONTEXT_MODE",
@@ -558,9 +738,25 @@ class AgentCore:
                 "Kullanıcı repo yolunu verdiyse veya yakın sohbet bağlamından "
                 "biliniyorsa tekrar isteme. "
 
-                "Önce list_folder, get_file_info ve read_text_file gibi yerel "
-                "araçlarla göreve ilişkin repository yapısını ve ilgili "
-                "dosyaları gerçekten incele. "
+                "Repository incelemesine repository_snapshot ile başla. Kullanıcı açık bir "
+                "repo yolu verdiyse path alanında kullan; 'repo artık burada/bunu ana repo "
+                "yap' gibi açık bir talep varsa bind_repository ile doğrulayıp kanonik "
+                "bağlantıyı değiştir. Yol verilmediyse repository_snapshot cihazdaki "
+                "kanonik binding'i kullanabilir. Büyük repolarda next_cursor bitene kadar "
+                "250-500 dosyalık batch'lerle indeksle; tek dev prompt'a binlerce yol basma. "
+                "Repo-wide incelemede full index tamamlanabilir, task-scoped incelemede ise "
+                "delta_paths ve ilgili entrypoint/test dosyalarına öncelik ver. Ardından göreve "
+                "göre Layer-1, Layer-2, Layer-3, tests, docs ve entrypoint/config dosyalarını "
+                "read_text_file ile sistematik incele. Büyük dosyalarda offset'i truncated=false "
+                "olana kadar ilerlet. Aynı çağrıyı sonuç değişmeden tekrarlama. "
+                ".epis/repo-context.md semantik önbellektir, kaynak kanıtı değildir; "
+                ".epis/inspection-state.json Core'un deterministik Git/fingerprint checkpoint'idir. "
+                "state_status=stale veya delta_paths varsa değişen dosyaları yeniden doğrula. "
+                "Sadece inceleme isteyen turda source veya .epis dosyası yazma. Kullanıcı mevcut "
+                "turda açıkça kaydet/güncelle/değiştir gibi mutation yetkisi verdiyse, Sol'un "
+                "kanıta dayalı repo özetini save_repository_context ile kaydedebilir ve "
+                "observed_paths alanına gerçekten okunan dosyaları verebilirsin; Core SHA256'ları "
+                "yerelde yeniden hesaplar. "
 
                 "Ardından delegate_to_sol çağrısında repo_path alanına repo "
                 "yolunu, context alanına yalnızca araçlarla gerçekten gördüğün "
@@ -573,14 +769,22 @@ class AgentCore:
                 "Kullanıcının isteğine göre Sol için açık ve teknik bir "
                 "görev yaz. "
 
-                "Sol bir değişiklik önerirse bunu otomatik uygulama; "
-                "kullanıcıya hangi dosya veya fonksiyonda ne önerdiğini, "
-                "nedenini, riskini ve gereken testi EPIS'in kendi ağzıyla "
-                "anlat ve uygulamak isteyip istemediğini sor. "
+                "Repository editlerinde mevcut bir kaynak dosyasını komple yeniden "
+                "üretmek yerine apply_text_patch kullan. Kullanıcı yalnız inceleme/review "
+                "istediyse Sol'un değişiklik önerisini dosya/fonksiyon, neden, risk ve test "
+                "ile açıkla ve uygulamak isteyip istemediğini sor; bu turda mutation tool "
+                "çağırma. Kullanıcı baştan açıkça düzelt/değiştir/uygula/ekle/oluştur gibi "
+                "bir mutation istediğinde aynı edit için ikinci kez semantik onay isteme; "
+                "Core gereken path/security approval'ını ayrıca yönetir. Değişiklikten hemen "
+                "önce dosyanın SHA'sını yeniden doğrula. "
 
-                "Kullanıcı daha sonraki bir mesajda açıkça onay verirse "
-                "değişiklikten önce ilgili dosyaları yeniden oku ve güncel "
-                "olduklarını doğrula. "
+                "Kullanıcının sorusu kendi geçmişi, kişiler, sensörler, ekran/telefon "
+                "durumu veya yerel kişisel bağlam gerektiriyorsa ve get_personal_context "
+                "canlıysa bu aracı kullan. Araç yalnız cihazda ilgili veriyi toplar ve "
+                "kimlik/PII bilgisini yerelde takma adlandırdıktan sonra bounded safe_context "
+                "döndürür. [KNOWN_USER] tokenini kullanıcıya tekrar etme; 'sen' diye doğal "
+                "konuş. [KISI_n]/[YER_n] tokenlarından gerçek isim tahmin etme. Genel bilgi "
+                "sorularında bu aracı gereksiz yere çağırma. "
 
                 "Kullanıcı desteklenen bir işlemi istediyse uygun tool "
                 "çağrısını öner. "
@@ -628,7 +832,10 @@ class AgentCore:
                 "\n\n# EXECUTION CONTRACT\n"
                 "For multi-step user goals, choose semantic tools that express the "
                 "user's intent and continue until the goal is complete, blocked, "
-                "needs approval/clarification, or the bounded tool budget is exhausted. "
+                "or needs approval/clarification. Read-only repository inspection has "
+                "no fixed step budget; do not stop just because several list/read/info "
+                "calls were needed. Core still blocks repeated identical calls and "
+                "bounds consequential side-effect calls. "
                 "Core owns supported technical prerequisites, device routing, "
                 "app/window correlation, focus recovery, permission enforcement and "
                 "runtime world state. Do not memorize or manually reproduce hidden OS "
@@ -683,31 +890,169 @@ class AgentCore:
                 + context
             )
 
-        if self.pending is not None:
+        if pending_count:
             system += (
-                "\n\n# BEKLEYEN ONAY\n"
-                "UI'da ayrı bir işlem onay bekliyor. Kullanıcı bu sırada "
-                "normal sohbet etmeye devam edebilir. Yeni mesajı eski işlemin "
-                "onayı veya reddi sayma; eski işlemi yapılmış da sayma. "
-                "Evet/Hayır butonları Core tarafından ayrı yönetilir."
+                "\n\n# BEKLEYEN ONAYLAR\n"
+                f"Shared session içinde {pending_count} ayrı işlem kullanıcı onayı "
+                "bekliyor. Yeni mesajı bu eski işlemlerin onayı/reddi sayma; her "
+                "approval kendi request/client kimliğine bağlıdır. Kullanıcı diğer "
+                "cihazlardan ve bu cihazdan normal sohbete devam edebilir."
             )
+
+        if other_active:
+            safe_active = [
+                {
+                    "request_id": item.get("request_id"),
+                    "client_id": item.get("client_id"),
+                    "status": item.get("status"),
+                    "user_message": str(item.get("user_message") or "")[:1000],
+                }
+                for item in other_active[-8:]
+            ]
+            system += (
+                "\n\n# SHARED SESSION - IN FLIGHT\n"
+                "Aynı kullanıcı oturumunda başka cihaz/turn'lerde halen işlenen "
+                "istekler var. Bunlar bağlamdır; onların tool sonucunu olmuş gibi "
+                "varsayma ve aynı yan etkiyi tekrar etme.\n"
+                + json.dumps(
+                    safe_active,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+
+        self._register_active_turn(
+            request_id,
+            client_id,
+            origin_device_id,
+            user_message,
+        )
 
         messages = [
             {
                 "role": "system",
                 "content": system,
             },
-            *self.history,
+            *history_snapshot,
             {
                 "role": "user",
                 "content": user_message,
             },
         ]
 
-        return self._run(
-            messages,
-            user_message,
+        try:
+            turn = self._run(
+                messages,
+                user_message,
+                request_id=request_id,
+                client_id=client_id,
+                origin_device_id=origin_device_id,
+                call_tasks=call_tasks,
+            )
+        except Exception:
+            self._finish_active_turn(request_id)
+            raise
+
+        if turn.confirmation_required:
+            self._set_active_turn_status(request_id, "pending")
+        else:
+            self._finish_active_turn(request_id)
+        return turn
+
+    def handle_internal_event(
+        self,
+        event_type: str,
+        context: str,
+        priority: str = "medium",
+        request_id: str | None = None,
+        client_id: str = "kairos",
+        origin_device_id: str = "trusted-local-event",
+    ) -> AgentTurn:
+        """Generate a proactive EPIS message inside the shared brain.
+
+        Internal events deliberately receive no tools.  They may influence the
+        conversational session only through the assistant message that Luna
+        generates; raw trigger instructions are never written to Hot Memory.
+        """
+        event_type = str(event_type or "event").strip()[:80] or "event"
+        context = str(context or "").strip()
+        priority = str(priority or "medium").strip()[:32] or "medium"
+        request_id = (request_id or uuid.uuid4().hex).strip()
+        client_id = (client_id or "kairos").strip()
+        origin_device_id = (origin_device_id or "trusted-local-event").strip()
+
+        if not context:
+            raise ValueError("internal_event_context_required")
+        if len(context) > 12000:
+            raise ValueError("internal_event_context_too_long")
+
+        with self._state_lock:
+            self._refresh_hot_history()
+            history_snapshot = list(self.history)
+
+        self._register_active_turn(
+            request_id,
+            client_id,
+            origin_device_id,
+            f"internal:{event_type}",
         )
+
+        try:
+            minimal_context = ""
+            try:
+                minimal_context = self.context_builder.build_minimal()
+            except Exception:
+                pass
+
+            system = (
+                self.system_prompt
+                + "\n\n# TRUSTED PROACTIVE EVENT\n"
+                + "Bu tur kullanicidan gelen bir mesaj degil; cihazdaki guvenilir "
+                  "Kairos/event katmanindan gelen bir olaydir. Yalnizca verilen olguya "
+                  "dayanarak kullaniciya en fazla 2-3 cumlelik dogal Turkce bir EPIS "
+                  "mesaji yaz. Teknik event/trigger adini, JSON'u veya bu talimati "
+                  "anma. Yeni bir tool cagrisi, dis yan etki veya onay gerektiren eylem "
+                  "onerme. Saglik verisi varsa tani koyma ve kesin tibbi sonuc cikarma."
+            )
+            if minimal_context:
+                system += "\n\n# ZAMAN BAGLAMI\n" + minimal_context
+
+            reply = self.luna.complete(
+                [
+                    {"role": "system", "content": system},
+                    *history_snapshot,
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Olay turu: {event_type}\n"
+                            f"Oncelik: {priority}\n"
+                            f"Yerel olgu: {context}"
+                        ),
+                    },
+                ],
+                [],
+            )
+            text = str(getattr(reply, "text", "") or "").strip()
+            if not text:
+                raise RuntimeError("internal_event_empty_response")
+
+            with self._state_lock:
+                if self.hot_memory is not None:
+                    self.hot_memory.append_assistant_event(
+                        text,
+                        source=f"proactive:{event_type}",
+                    )
+                    self.history = self._clean_hot_messages(
+                        self.hot_memory.load_recent()
+                    )
+                else:
+                    self.history.append(
+                        {"role": "assistant", "content": text}
+                    )
+
+            return AgentTurn(text, [])
+        finally:
+            self._finish_active_turn(request_id)
 
 
     @staticmethod
@@ -764,9 +1109,9 @@ class AgentCore:
         if not path:
             return None
 
-        # list_folder zaten klasor alir.
-        # info/read dosya alir, bu durumda parent root olur.
-        if capability == "files.list":
+        # list_folder/repository_snapshot already target a directory.
+        # info/read target a file, so their session root is the parent.
+        if capability in {"files.list", "repository.inspect"}:
             root = path
         else:
             root = os.path.dirname(
@@ -826,6 +1171,11 @@ class AgentCore:
         if not path:
             return False
 
+        with self._state_lock:
+            grants = tuple(
+                self._session_read_grants
+            )
+
         return any(
             (
                 granted_device
@@ -839,7 +1189,7 @@ class AgentCore:
                 granted_device,
                 root,
             )
-            in self._session_read_grants
+            in grants
         )
 
     def _grant_session_read_for_call(
@@ -858,12 +1208,13 @@ class AgentCore:
         if not root:
             return None
 
-        self._session_read_grants.add(
-            (
-                device_id,
-                root,
+        with self._state_lock:
+            self._session_read_grants.add(
+                (
+                    device_id,
+                    root,
+                )
             )
-        )
 
         self._log(
             "session_read_granted",
@@ -873,155 +1224,333 @@ class AgentCore:
 
         return root
 
-    def _supersede_pending(self) -> None:
-        """Cancel one older pending action when a newer approval replaces it."""
-        if self.pending is None:
-            return
+    def _write_scope_for_call(
+        self,
+        capability: str,
+        arguments: dict,
+        device_id: str,
+    ) -> tuple[str | None, str | None, str | None]:
+        if (
+            capability not in {"files.write_text", "files.patch_text"}
+            or device_id != self.local_agent.device.device_id
+        ):
+            return None, None, None
 
-        pending, self.pending = self.pending, None
-        for call in [pending.tool_call, *pending.remaining_calls]:
-            task_id = self._call_tasks.get(call.call_id)
-            if task_id:
-                self.tasks.finish(task_id, "cancelled")
-
-        self._log(
-            "pending_approval_superseded",
-            tool=pending.tool_call.name,
+        path = self._normalize_session_read_path(
+            arguments.get("path")
         )
+        if not path:
+            return None, None, None
+
+        parent = os.path.dirname(path)
+        drive, _ = os.path.splitdrive(parent)
+        if not drive:
+            return None, None, None
+
+        root = parent
+        cursor = parent
+        while cursor and cursor.rstrip("/\\") != drive.rstrip("/\\"):
+            if os.path.exists(
+                os.path.join(cursor, ".git")
+            ):
+                root = cursor
+                break
+            next_cursor = os.path.dirname(cursor)
+            if next_cursor == cursor:
+                break
+            cursor = next_cursor
+
+        if root.rstrip("/\\") == drive.rstrip("/\\"):
+            return None, None, None
+
+        permission = (
+            "files.modify"
+            if capability == "files.patch_text" or os.path.exists(path)
+            else "files.create"
+        )
+        return path, root, permission
+
+    def _has_persistent_write_grant(
+        self,
+        capability: str,
+        arguments: dict,
+        device_id: str,
+    ) -> tuple[bool, str | None, tuple[str, ...]]:
+        path, root, permission = self._write_scope_for_call(
+            capability, arguments, device_id
+        )
+        permissions = ("files.create", "files.modify")
+        if not path or not root or not permission:
+            return False, root, permissions
+        return (
+            self.path_grants.allows(path, permission),
+            root,
+            permissions,
+        )
+
+    def _call_is_budget_free(self, call: ToolCall) -> bool:
+        if call.name in {
+            "delegate_to_sol",
+            "get_devices",
+            "get_task_status",
+        }:
+            return True
+        entry = self.registry.get(call.name)
+        if not entry:
+            return False
+        spec, _ = entry
+        effects = set(spec.effects or ())
+        if effects and effects.issubset({"read", "observe"}):
+            return True
+        # Backward-compatible fallback while older tool specs are migrated to
+        # explicit effect metadata.
+        return spec.capability in _BUDGET_FREE_CAPABILITIES
+
+    @staticmethod
+    def _call_fingerprint(call: ToolCall) -> str:
+        try:
+            arguments = json.dumps(
+                call.arguments,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError):
+            arguments = repr(call.arguments)
+        return f"{call.name}:{arguments}"
+
+    def _resolve_pending_id(
+        self,
+        approval_id: str | None,
+    ) -> str | None:
+        with self._state_lock:
+            if approval_id:
+                return (
+                    approval_id
+                    if approval_id in self._pending_actions
+                    else None
+                )
+            if len(self._pending_actions) == 1:
+                return next(iter(self._pending_actions))
+            return None
+
+    def _take_pending(
+        self,
+        approval_id: str | None,
+        client_id: str | None = None,
+    ) -> PendingAction | None:
+        resolved = self._resolve_pending_id(approval_id)
+        if resolved is None:
+            return None
+        with self._state_lock:
+            pending = self._pending_actions.get(resolved)
+            if pending is None:
+                return None
+            if (
+                client_id
+                and pending.client_id
+                and client_id != pending.client_id
+            ):
+                return None
+            return self._pending_actions.pop(resolved, None)
+
+    def _cancel_pending_tasks(
+        self,
+        pending: PendingAction,
+    ) -> None:
+        for call in [
+            pending.tool_call,
+            *pending.remaining_calls,
+        ]:
+            task_id = pending.call_tasks.get(call.call_id)
+            if task_id:
+                self._task_finish(task_id, "cancelled")
 
     def confirm_pending(
         self,
         approval_id: str | None = None,
+        client_id: str | None = None,
     ) -> AgentTurn:
-        if not self.pending:
-            return AgentTurn(
-                "Onay bekleyen bir işlem yok.",
-                [],
-            )
-
-        if (
-            approval_id is not None
-            and approval_id != self.pending.approval_id
-        ):
+        pending = self._take_pending(
+            approval_id,
+            client_id,
+        )
+        if pending is None:
+            if approval_id is None and self.pending_count() > 1:
+                return AgentTurn(
+                    "Birden fazla onay bekliyor; approval_id gerekli.",
+                    [],
+                )
             return AgentTurn(
                 "Bu onay isteği artık geçerli değil.",
                 [],
             )
 
-        pending, self.pending = (
-            self.pending,
-            None,
+        self._set_turn_call_tasks(pending.call_tasks)
+        self._set_active_turn_status(
+            pending.request_id,
+            "running",
         )
 
-        if (
-            time.monotonic()
-            > pending.expires_at
-        ):
-            self.pending = pending
-
-            turn = self.reject_pending()
-
-            turn.message = (
+        if time.monotonic() > pending.expires_at:
+            self._cancel_pending_tasks(pending)
+            text = (
                 "Onayın süresi doldu; işlem yapılmadı. "
                 "İstersen yeniden iste."
             )
+            pending.messages.append(
+                {
+                    "role": "assistant",
+                    "content": text,
+                }
+            )
+            self._remember(
+                pending.messages,
+                pending.user_message,
+                text,
+            )
+            self._finish_active_turn(
+                pending.request_id
+            )
+            return AgentTurn(
+                text,
+                pending.results,
+            )
 
-            return turn
+        try:
+            entry = self.registry.get(
+                pending.tool_call.name
+            )
 
-        entry = self.registry.get(
-            pending.tool_call.name
-        )
+            if entry:
+                pending_spec, _ = entry
 
-        if entry:
-            pending_spec, _ = entry
-
-            pending_device = (
-                pending.tool_call.arguments.get(
-                    "device_id"
+                pending_device = (
+                    pending.tool_call.arguments.get(
+                        "device_id"
+                    )
+                    or self.local_agent.device.device_id
                 )
-                or self.local_agent.device.device_id
+
+                self._grant_session_read_for_call(
+                    pending_spec.capability,
+                    pending.tool_call.arguments,
+                    pending_device,
+                )
+
+            if (
+                pending.persistent_path_grant_on_confirm
+                and pending.path_grant_root
+                and pending.path_grant_permissions
+            ):
+                with self._state_lock:
+                    granted_root = self.path_grants.grant(
+                        pending.path_grant_root,
+                        pending.path_grant_permissions,
+                    )
+                self._log(
+                    "persistent_path_granted",
+                    root=granted_root,
+                    permissions=list(
+                        pending.path_grant_permissions
+                    ),
+                )
+
+            if (
+                pending.session_grant_on_confirm
+                and pending.authorization_category
+            ):
+                with self._state_lock:
+                    granted = self.authorization.grant(
+                        pending.authorization_category
+                    )
+                if granted:
+                    self._log(
+                        "session_authorization_granted",
+                        category=(
+                            pending.authorization_category
+                        ),
+                    )
+
+            turn = self._dispatch(
+                pending.tool_call,
+                confirmed=True,
+                user_message=pending.user_message,
             )
 
-            self._grant_session_read_for_call(
-                pending_spec.capability,
-                pending.tool_call.arguments,
-                pending_device,
+            pending.results.extend(
+                turn.tool_results
             )
 
-        if (
-            pending.session_grant_on_confirm
-            and pending.authorization_category
-            and self.authorization.grant(pending.authorization_category)
-        ):
-            self._log(
-                "session_authorization_granted",
-                category=pending.authorization_category,
+            if turn.tool_results:
+                self._append_result(
+                    pending.messages,
+                    pending.tool_call,
+                    turn.tool_results[0],
+                )
+
+            resumed = self._run(
+                pending.messages,
+                pending.user_message,
+                pending.results,
+                pending.model_steps,
+                pending.sol_delegations,
+                pending.remaining_calls,
+                request_id=pending.request_id,
+                client_id=pending.client_id,
+                origin_device_id=(
+                    pending.origin_device_id
+                ),
+                call_tasks=pending.call_tasks,
             )
+        except Exception:
+            self._finish_active_turn(
+                pending.request_id
+            )
+            raise
 
-        turn = self._dispatch(
-            pending.tool_call,
-            confirmed=True,
-            user_message=pending.user_message,
-        )
-
-        pending.results.extend(
-            turn.tool_results
-        )
-
-        self._append_result(
-            pending.messages,
-            pending.tool_call,
-            turn.tool_results[0],
-        )
-
-        return self._run(
-            pending.messages,
-            pending.user_message,
-            pending.results,
-            pending.model_steps,
-            pending.sol_delegations,
-            pending.remaining_calls,
-        )
+        if resumed.confirmation_required:
+            self._set_active_turn_status(
+                pending.request_id,
+                "pending",
+            )
+        else:
+            self._finish_active_turn(
+                pending.request_id
+            )
+        return resumed
 
     def reject_pending(
         self,
         approval_id: str | None = None,
+        client_id: str | None = None,
     ) -> AgentTurn:
-        if not self.pending:
-            return AgentTurn(
-                "Onay bekleyen bir işlem yok.",
-                [],
-            )
-
-        if (
-            approval_id is not None
-            and approval_id != self.pending.approval_id
-        ):
+        pending = self._take_pending(
+            approval_id,
+            client_id,
+        )
+        if pending is None:
+            if approval_id is None and self.pending_count() > 1:
+                return AgentTurn(
+                    "Birden fazla onay bekliyor; approval_id gerekli.",
+                    [],
+                )
             return AgentTurn(
                 "Bu onay isteği artık geçerli değil.",
                 [],
             )
 
-        pending, self.pending = (
-            self.pending,
-            None,
+        self._set_turn_call_tasks(
+            pending.call_tasks
+        )
+        self._cancel_pending_tasks(
+            pending
         )
 
         for call in [
             pending.tool_call,
             *pending.remaining_calls,
         ]:
-            if (
-                call.call_id
-                in self._call_tasks
-            ):
-                self.tasks.finish(
-                    self._call_tasks[
-                        call.call_id
-                    ],
-                    "cancelled",
-                )
-
             self._append_result(
                 pending.messages,
                 call,
@@ -1035,7 +1564,7 @@ class AgentCore:
             )
 
         text = (
-            "Tamam, bekleyen işlemleri iptal ettim."
+            "Tamam, bekleyen işlemi iptal ettim."
         )
 
         pending.messages.append(
@@ -1050,18 +1579,22 @@ class AgentCore:
             pending.user_message,
             text,
         )
+        self._finish_active_turn(
+            pending.request_id
+        )
 
         return AgentTurn(
             text,
             pending.results,
         )
 
+
     def delegate_to_sol(
         self,
         task: str,
         context: dict | None = None,
     ) -> dict:
-        """Delegate one bounded specialist analysis to Sol."""
+        """Delegate specialist analysis to Sol; loop guards live in the agent loop."""
 
         return self.sol.analyze(
             task,
@@ -1095,7 +1628,14 @@ class AgentCore:
         model_steps=0,
         sol_delegations=0,
         remaining_calls=None,
+        *,
+        request_id: str = "",
+        client_id: str = "",
+        origin_device_id: str = "",
+        call_tasks: dict[str, str] | None = None,
     ) -> AgentTurn:
+        if call_tasks is not None:
+            self._set_turn_call_tasks(call_tasks)
         results = (
             results
             if results is not None
@@ -1105,11 +1645,11 @@ class AgentCore:
         calls = list(
             remaining_calls or []
         )
+        identical_call_counts: dict[str, int] = {}
+        recent_call_fingerprints: list[str] = []
+        side_effect_calls = 0
 
-        while (
-            calls
-            or model_steps < 4
-        ):
+        while True:
             if not calls:
                 try:
                     reply = self.luna.complete(
@@ -1216,29 +1756,81 @@ class AgentCore:
 
                     continue
 
-                if (
-                    model_steps >= 4
-                    or len(results) >= 64
-                ):
+                fingerprint = self._call_fingerprint(call)
+                identical_call_counts[fingerprint] = (
+                    identical_call_counts.get(fingerprint, 0) + 1
+                )
+                if identical_call_counts[fingerprint] > _MAX_IDENTICAL_CALLS_PER_TURN:
                     result = {
                         "ok": False,
                         "error": (
-                            "Tool budget exhausted; "
-                            "not executed"
+                            "Repeated identical tool call blocked; "
+                            "use the existing result or change the inspection"
                         ),
                     }
-
-                    results.append(
-                        result
+                    results.append(result)
+                    self._append_result(messages, call, result)
+                    text = (
+                        "Aynı araç çağrısı tekrarlayan bir döngüye girdi; "
+                        "işlemi güvenli biçimde durdurdum."
                     )
+                    messages.append({"role": "assistant", "content": text})
+                    self._remember(messages, user_message, text)
+                    return AgentTurn(text, results)
 
-                    self._append_result(
-                        messages,
-                        call,
-                        result,
+                recent_call_fingerprints.append(fingerprint)
+                if len(recent_call_fingerprints) > 16:
+                    recent_call_fingerprints.pop(0)
+
+                repeating_cycle = False
+                for cycle_width in (2, 3, 4):
+                    needed = cycle_width * 3
+                    if len(recent_call_fingerprints) < needed:
+                        continue
+                    tail = recent_call_fingerprints[-needed:]
+                    pattern = tail[:cycle_width]
+                    if tail == pattern * 3:
+                        repeating_cycle = True
+                        break
+
+                if repeating_cycle:
+                    result = {
+                        "ok": False,
+                        "error": (
+                            "Repeated tool-call cycle blocked; "
+                            "change the inspection strategy"
+                        ),
+                    }
+                    results.append(result)
+                    self._append_result(messages, call, result)
+                    text = (
+                        "Araç çağrıları ilerleme sağlamayan tekrarlayan bir "
+                        "döngüye girdi; işlemi güvenli biçimde durdurdum."
                     )
+                    messages.append({"role": "assistant", "content": text})
+                    self._remember(messages, user_message, text)
+                    return AgentTurn(text, results)
 
-                    continue
+                if not self._call_is_budget_free(call):
+                    if side_effect_calls >= _MAX_SIDE_EFFECT_CALLS_PER_TURN:
+                        result = {
+                            "ok": False,
+                            "error": (
+                                "Side-effect tool budget exhausted; "
+                                "read-only inspection may continue"
+                            ),
+                        }
+                        results.append(result)
+                        self._append_result(messages, call, result)
+                        text = (
+                            "Bu turda çok fazla durum değiştiren işlem oluştu; "
+                            "salt-okuma incelemesi sınırsız olsa da yan etkili "
+                            "işlemler için güvenlik sınırında durdum."
+                        )
+                        messages.append({"role": "assistant", "content": text})
+                        self._remember(messages, user_message, text)
+                        return AgentTurn(text, results)
+                    side_effect_calls += 1
 
                 if (
                     call.name
@@ -1298,22 +1890,46 @@ class AgentCore:
                         user_message,
                     )
 
-                    if self.pending is not None:
-                        self._supersede_pending()
-
-                    self.pending = (
-                        PendingAction(
-                            deepcopy(call),
-                            list(messages),
-                            user_message,
-                            batch[
-                                index + 1 :
-                            ],
-                            results,
-                            model_steps,
-                            sol_delegations,
-                        )
+                    pending = PendingAction(
+                        deepcopy(call),
+                        list(messages),
+                        user_message,
+                        batch[
+                            index + 1 :
+                        ],
+                        results,
+                        model_steps,
+                        sol_delegations,
+                        approval_id=approval_id,
+                        approval_message=approval_message,
+                        authorization_category=str(
+                            approval.get("authorization_category") or ""
+                        ),
+                        session_grant_on_confirm=bool(
+                            approval.get("session_grant_on_confirm")
+                        ),
+                        path_grant_root=str(
+                            approval.get("path_grant_root") or ""
+                        ),
+                        path_grant_permissions=tuple(
+                            approval.get("path_grant_permissions") or ()
+                        ),
+                        persistent_path_grant_on_confirm=bool(
+                            approval.get("persistent_path_grant_on_confirm")
+                        ),
+                        request_id=request_id,
+                        client_id=client_id,
+                        origin_device_id=origin_device_id,
+                        call_tasks=(
+                            call_tasks
+                            if call_tasks is not None
+                            else self._current_call_tasks()
+                        ),
                     )
+
+                    with self._state_lock:
+                        self._pending_actions[approval_id] = pending
+                    self._set_active_turn_status(request_id, "pending")
 
                     approval_payload = {
                         "id": approval_id,
@@ -1321,17 +1937,10 @@ class AgentCore:
                         "tool": approval.get("tool", call.name),
                         "capability": approval.get("capability"),
                         "risk": approval.get("risk"),
+                        "request_id": request_id,
+                        "client_id": client_id,
+                        "origin_device_id": origin_device_id,
                     }
-                    # Store UI identity alongside the pending action without
-                    # exposing it to device execution arguments.
-                    self.pending.approval_id = approval_id
-                    self.pending.approval_message = approval_message
-                    self.pending.authorization_category = str(
-                        approval.get("authorization_category") or ""
-                    )
-                    self.pending.session_grant_on_confirm = bool(
-                        approval.get("session_grant_on_confirm")
-                    )
 
                     return AgentTurn(
                         "",
@@ -1393,15 +2002,6 @@ class AgentCore:
                 "error": error,
             }
 
-        if sol_delegations >= 1:
-            return {
-                "ok": False,
-                "error": (
-                    "Sol delegation limit reached "
-                    "for this turn"
-                ),
-            }
-
         task = call.arguments.get(
             "task",
             "",
@@ -1460,6 +2060,14 @@ class AgentCore:
                 "Do not claim to have opened local files yourself."
             ),
             (
+                "REPOSITORY MEMORY POLICY:\n"
+                "- .epis/inspection-state.json is deterministic Core state.\n"
+                "- .epis/repo-context.md is a semantic cache, never source evidence.\n"
+                "- Prefer fresh supplied file evidence for changed/delta paths.\n"
+                "- For a context update, produce concise Markdown grounded only in supplied evidence.\n"
+                "- Never invent unseen files or claim the cache proves current code behavior."
+            ),
+            (
                 "IMPORTANT CHANGE POLICY:\n"
                 "- Do not modify anything.\n"
                 "- Do not claim that a modification was applied.\n"
@@ -1469,8 +2077,8 @@ class AgentCore:
                 "  3. concrete reason\n"
                 "  4. possible risk/side effect\n"
                 "  5. tests that should verify it\n"
-                "- Luna will explain proposed changes to the user and "
-                "ask before any modification is attempted."
+                "- Luna/Core decide whether the current user turn already explicitly "
+                "authorized mutation. If not, Luna presents the proposal before any edit."
             ),
         ]
 
@@ -1714,13 +2322,9 @@ class AgentCore:
                 source=authorization.source,
             )
 
-        if (
-            call.call_id
-            not in self._call_tasks
-        ):
-            self._call_tasks[
-                call.call_id
-            ] = self.tasks.create(
+        call_tasks = self._current_call_tasks()
+        if call.call_id not in call_tasks:
+            call_tasks[call.call_id] = self._task_create(
                 call.name,
                 (
                     "provider:"
@@ -1728,10 +2332,8 @@ class AgentCore:
                 ),
             )
 
-        task_id = self._call_tasks[
-            call.call_id
-        ]
-        if not self.tasks.claim(task_id):
+        task_id = call_tasks[call.call_id]
+        if not self._task_claim(task_id):
             return AgentTurn(
                 "",
                 [{
@@ -1762,7 +2364,7 @@ class AgentCore:
                 else "failed"
             )
         )
-        self.tasks.finish(
+        self._task_finish(
             task_id,
             state,
         )
@@ -1840,7 +2442,7 @@ class AgentCore:
                 result = {
                     "ok": True,
                     "tasks": (
-                        self.tasks.recent()
+                        self._task_recent()
                     ),
                 }
 
@@ -1921,6 +2523,44 @@ class AgentCore:
                 ],
             )
 
+        action_authorization = self.authorization.evaluate(
+            spec.capability,
+            call.arguments,
+            user_message,
+        )
+        if action_authorization.category == "file_mutation":
+            if action_authorization.denied:
+                return AgentTurn(
+                    "",
+                    [{
+                        "ok": False,
+                        "error": "current_user_instruction_denies_file_mutation",
+                    }],
+                )
+            if not action_authorization.authorized:
+                # Do not turn a model-proposed write into a permission card.  The
+                # user must first explicitly request the mutation in chat; only
+                # then may Core consider persistent path/security permission.
+                return AgentTurn(
+                    "",
+                    [{
+                        "ok": False,
+                        "error": "file_mutation_requires_explicit_user_request",
+                        "authorization_category": "file_mutation",
+                    }],
+                )
+
+        if action_authorization.category == "repository_binding":
+            if not action_authorization.authorized:
+                return AgentTurn(
+                    "",
+                    [{
+                        "ok": False,
+                        "error": "repository_binding_requires_explicit_user_request",
+                        "authorization_category": "repository_binding",
+                    }],
+                )
+
         requested_device = call.arguments.get(
             "device_id"
         )
@@ -1953,22 +2593,14 @@ class AgentCore:
             )
         )
 
-        if (
-            call.call_id
-            not in self._call_tasks
-        ):
-            self._call_tasks[
-                call.call_id
-            ] = self.tasks.create(
+        call_tasks = self._current_call_tasks()
+        if call.call_id not in call_tasks:
+            call_tasks[call.call_id] = self._task_create(
                 call.name,
                 target_device,
             )
 
-        task_id = (
-            self._call_tasks[
-                call.call_id
-            ]
-        )
+        task_id = call_tasks[call.call_id]
 
         session_read_target_device = target_device
 
@@ -1987,10 +2619,21 @@ class AgentCore:
             )
         )
 
+        (
+            persistent_write_granted,
+            path_grant_root,
+            path_grant_permissions,
+        ) = self._has_persistent_write_grant(
+            spec.capability,
+            call.arguments,
+            target_device,
+        )
+
         if (
             decision.requires_confirmation
             and not confirmed
             and not session_read_granted
+            and not persistent_write_granted
         ):
             target = (
                 device.display_name
@@ -2000,12 +2643,25 @@ class AgentCore:
             reason = decision.reason
             notice = spec.confirmation_notice
 
+            persistent_path_grant = bool(
+                path_grant_root
+                and spec.capability in {"files.write_text", "files.patch_text"}
+            )
+
             if session_read_root:
                 reason = "session read access requires confirmation"
                 notice = (
                     "Bu klasör altında salt-okuma erişimi verilecek; "
                     "okunan veriler model API'sine gönderilebilir. "
                     "Yazma, kopyalama, taşıma ve shell dahil değildir."
+                )
+            elif persistent_path_grant:
+                reason = "persistent recursive path write access requires confirmation"
+                notice = (
+                    f"Onay verirsen {path_grant_root} ve tüm alt klasörlerinde "
+                    "metin/kaynak dosyası oluşturma ve güncelleme izni kalıcı "
+                    "olarak hatırlanacak. Silme, taşıma ve komut çalıştırma bu "
+                    "izne dahil değildir."
                 )
 
             return AgentTurn(
@@ -2020,11 +2676,18 @@ class AgentCore:
                     "arguments": deepcopy(call.arguments),
                     "reason": reason,
                     "notice": notice,
+                    "path_grant_root": path_grant_root if persistent_path_grant else "",
+                    "path_grant_permissions": (
+                        list(path_grant_permissions)
+                        if persistent_path_grant
+                        else []
+                    ),
+                    "persistent_path_grant_on_confirm": persistent_path_grant,
                 },
             )
 
         if not device:
-            self.tasks.finish(
+            self._task_finish(
                 task_id,
                 "failed",
             )
@@ -2050,7 +2713,7 @@ class AgentCore:
         )
 
         if not transport:
-            self.tasks.finish(
+            self._task_finish(
                 task_id,
                 "failed",
             )
@@ -2080,7 +2743,7 @@ class AgentCore:
             )
             recovery_summaries = preparation.recoveries
             if not preparation.ok:
-                self.tasks.finish(
+                self._task_finish(
                     task_id,
                     "failed",
                 )
@@ -2098,7 +2761,7 @@ class AgentCore:
                     [result],
                 )
 
-        if not self.tasks.claim(
+        if not self._task_claim(
             task_id
         ):
             return AgentTurn(
@@ -2129,6 +2792,7 @@ class AgentCore:
                 confirmed=(
                     confirmed
                     or session_read_granted
+                    or persistent_write_granted
                 ),
                 request_id=task_id,
             )
@@ -2173,7 +2837,7 @@ class AgentCore:
             )
         )
 
-        self.tasks.finish(
+        self._task_finish(
             task_id,
             state,
         )
@@ -2207,47 +2871,59 @@ class AgentCore:
         user_message: str,
         response: str,
     ) -> None:
-        """Persist completed conversation turn."""
+        """Persist one completed turn into the shared session safely."""
 
-        if self.hot_memory is not None:
-            try:
-                self.hot_memory.append_turn(
-                    user_message,
-                    response,
-                )
-
-            except Exception as exc:
-                self._log(
-                    "hot_memory_write_failed",
-                    error=type(exc).__name__,
-                )
-
-        if self.hot_memory is not None:
-            try:
-                self.history = (
-                    self._clean_hot_messages(
-                        self.hot_memory.load_recent()
+        with self._state_lock:
+            if self.hot_memory is not None:
+                append_ok = True
+                try:
+                    self.hot_memory.append_turn(
+                        user_message,
+                        response,
                     )
-                )
-
-            except Exception as exc:
-                self._log(
-                    "hot_memory_refresh_failed",
-                    error=type(exc).__name__,
-                )
-
-                self.history = (
-                    self._conversation_only(
-                        messages
+                except Exception as exc:
+                    append_ok = False
+                    self._log(
+                        "hot_memory_write_failed",
+                        error=type(exc).__name__,
                     )
-                )
 
-        else:
-            self.history = (
-                self._conversation_only(
-                    messages
-                )
-            )
+                if append_ok:
+                    try:
+                        self.history = self._clean_hot_messages(
+                            self.hot_memory.load_recent()
+                        )
+                    except Exception as exc:
+                        self._log(
+                            "hot_memory_refresh_failed",
+                            error=type(exc).__name__,
+                        )
+                        append_ok = False
+
+                if not append_ok:
+                    if user_message.strip():
+                        self.history.append({
+                            "role": "user",
+                            "content": user_message.strip(),
+                        })
+                    if response.strip():
+                        self.history.append({
+                            "role": "assistant",
+                            "content": response.strip(),
+                        })
+            else:
+                # Do not replace history from an old per-turn snapshot: another
+                # client may have completed a turn while this one was running.
+                if user_message.strip():
+                    self.history.append({
+                        "role": "user",
+                        "content": user_message.strip(),
+                    })
+                if response.strip():
+                    self.history.append({
+                        "role": "assistant",
+                        "content": response.strip(),
+                    })
 
         if os.getenv("EPIS_DEPLOYMENT", "local").lower() != "cloud":
             try:
@@ -2261,12 +2937,12 @@ class AgentCore:
                         "agentic-0.1",
                     ],
                 )
-
             except Exception as exc:
                 self._log(
                     "memory_write_failed",
                     error=type(exc).__name__,
                 )
+
 
     @staticmethod
     def _conversation_only(
@@ -2312,35 +2988,48 @@ class AgentCore:
     def new_conversation(
         self,
     ) -> int:
-        """Clear only active/hot conversation context.
+        """Clear the one shared hot conversation across all clients.
 
-        Daily, weekly, identity, personality and long-term memories remain.
+        A reset is refused while a turn is actively executing. Pending approval
+        turns are safe to cancel because no side effect has been executed yet.
+        Daily/weekly/identity/long-term memories remain untouched.
         """
+        with self._state_lock:
+            running = [
+                item
+                for item in self._active_turns.values()
+                if item.get("status") == "running"
+            ]
+            if running:
+                raise RuntimeError("conversation_busy")
 
-        if self.pending:
-            self.reject_pending()
+            pending = list(
+                self._pending_actions.values()
+            )
+            self._pending_actions.clear()
 
-        cleared = len(
-            self.history
-        )
+        for item in pending:
+            self._cancel_pending_tasks(item)
 
-        self.history = []
-        self.restored_hot_messages = 0
-        self._call_tasks = {}
-        self._visual_observations.clear()
-        self.authorization.reset()
+        with self._state_lock:
+            cleared = len(self.history)
+            self.history = []
+            self.restored_hot_messages = 0
+            self._active_turns.clear()
+            self._visual_observations.clear()
+            self.authorization.reset()
 
-        if self.hot_memory is not None:
-            try:
-                self.hot_memory.mark_new_conversation()
-
-            except Exception as exc:
-                self._log(
-                    "hot_memory_boundary_failed",
-                    error=type(exc).__name__,
-                )
+            if self.hot_memory is not None:
+                try:
+                    self.hot_memory.mark_new_conversation()
+                except Exception as exc:
+                    self._log(
+                        "hot_memory_boundary_failed",
+                        error=type(exc).__name__,
+                    )
 
         return cleared
+
 
     def _model_tools(
         self,
@@ -2365,21 +3054,19 @@ class AgentCore:
             transport.device.device_id
         )
 
-        if (
-            device_id
-            in self.transports
-        ):
-            raise ValueError(
-                "Device already attached"
+        with self._state_lock:
+            if device_id in self.transports:
+                raise ValueError(
+                    "Device already attached"
+                )
+
+            self.devices.register(
+                transport.device
             )
 
-        self.devices.register(
-            transport.device
-        )
-
-        self.transports[
-            device_id
-        ] = transport
+            self.transports[
+                device_id
+            ] = transport
 
     def detach_transport(
         self,
@@ -2388,21 +3075,24 @@ class AgentCore:
     ) -> bool:
         """Detach only the expected live connection and mark it offline."""
 
-        current = self.transports.get(device_id)
-        if current is None or (
-            transport is not None
-            and current is not transport
-        ):
-            return False
-        if current is self.local_agent:
-            return False
-        self.transports.pop(device_id, None)
+        with self._state_lock:
+            current = self.transports.get(device_id)
+            if current is None or (
+                transport is not None
+                and current is not transport
+            ):
+                return False
+            if current is self.local_agent:
+                return False
+            self.transports.pop(device_id, None)
+
         current.close()
         self.execution.world.clear_device(device_id)
         device = self.devices.get(device_id)
         if device is not None:
             device.online = False
         return True
+
 
     def _record_tool_usage(
         self,
@@ -2446,8 +3136,15 @@ class AgentCore:
     def close(
         self,
     ):
-        if self.pending:
-            self.reject_pending()
+        with self._state_lock:
+            pending = list(
+                self._pending_actions.values()
+            )
+            self._pending_actions.clear()
+            self._active_turns.clear()
+
+        for item in pending:
+            self._cancel_pending_tasks(item)
 
         for transport in (
             self.transports.values()

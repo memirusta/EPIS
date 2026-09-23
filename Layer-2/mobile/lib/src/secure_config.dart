@@ -2,7 +2,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'models.dart';
 
-const defaultEpisServerUrl = 'wss://epis-emir-38541be39a7b.herokuapp.com/ws';
+const defaultEpisServerUrl = '';
 
 class SecureConfigStore {
   static const _urlKey = 'epis.server.url';

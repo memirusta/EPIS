@@ -112,12 +112,31 @@ class ToolRegistry:
         for key, value in arguments.items():
             definition = properties.get(key, {})
             expected = definition.get("type")
-            if expected == "string" and not isinstance(value, str):
-                return f"{key} must be a string"
-            if isinstance(value, str) and len(value) > definition.get("maxLength", 4096):
-                return f"{key} is too long"
+            if expected == "string":
+                if not isinstance(value, str):
+                    return f"{key} must be a string"
+                if len(value) < definition.get("minLength", 0):
+                    return f"{key} is too short"
+                if len(value) > definition.get("maxLength", 4096):
+                    return f"{key} is too long"
+            if expected == "boolean" and not isinstance(value, bool):
+                return f"{key} must be a boolean"
             if expected == "integer" and (not isinstance(value, int) or isinstance(value, bool)):
                 return f"{key} must be an integer"
+            if expected == "array":
+                if not isinstance(value, list):
+                    return f"{key} must be an array"
+                if len(value) < definition.get("minItems", 0):
+                    return f"{key} has too few items"
+                if len(value) > definition.get("maxItems", 10000):
+                    return f"{key} has too many items"
+                item_definition = definition.get("items", {})
+                if item_definition.get("type") == "string":
+                    for index, item in enumerate(value):
+                        if not isinstance(item, str):
+                            return f"{key}[{index}] must be a string"
+                        if len(item) > item_definition.get("maxLength", 4096):
+                            return f"{key}[{index}] is too long"
             if "enum" in definition and value not in definition["enum"]:
                 return f"{key} must be one of: {', '.join(map(str, definition['enum']))}"
             if "minimum" in definition and value < definition["minimum"]:
@@ -312,16 +331,20 @@ def build_local_registry() -> ToolRegistry:
     register_computer_device_tools(registry, windows)
     from .media import register_media_tools
     from .filesystem import register_folder_tools
+    from .repository_context import register_repository_tools
     from .system_tools import register_system_tools
     register_media_tools(registry)
     register_folder_tools(registry)
+    register_repository_tools(registry)
     register_system_tools(registry)
     from .file_tools import register_file_tools
     from .shell_tools import register_shell_tools
     from .spotify_tools import register_spotify_tools
     from .ui_tools import register_ui_tools
+    from .trusted_context import register_trusted_context_tools
     register_file_tools(registry)
     register_shell_tools(registry)
     register_spotify_tools(registry)
     register_ui_tools(registry)
+    register_trusted_context_tools(registry)
     return registry

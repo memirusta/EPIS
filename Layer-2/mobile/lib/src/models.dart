@@ -18,6 +18,9 @@ class ApprovalRequest {
   const ApprovalRequest({
     required this.id,
     required this.message,
+    required this.requestId,
+    this.clientId,
+    this.originDeviceId,
     this.tool,
     this.capability,
     this.risk,
@@ -25,6 +28,9 @@ class ApprovalRequest {
 
   final String id;
   final String message;
+  final String requestId;
+  final String? clientId;
+  final String? originDeviceId;
   final String? tool;
   final String? capability;
   final String? risk;
@@ -32,10 +38,19 @@ class ApprovalRequest {
   static ApprovalRequest? tryParse(Object? value) {
     if (value is! Map) return null;
     final map = Map<String, dynamic>.from(value);
-    if (map['id'] is! String || map['message'] is! String) return null;
+    if (map['id'] is! String ||
+        map['message'] is! String ||
+        map['request_id'] is! String) {
+      return null;
+    }
     return ApprovalRequest(
       id: map['id'] as String,
       message: map['message'] as String,
+      requestId: map['request_id'] as String,
+      clientId: map['client_id'] is String ? map['client_id'] as String : null,
+      originDeviceId: map['origin_device_id'] is String
+          ? map['origin_device_id'] as String
+          : null,
       tool: map['tool'] is String ? map['tool'] as String : null,
       capability: map['capability'] is String
           ? map['capability'] as String

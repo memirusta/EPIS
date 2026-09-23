@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+import threading
 
 
 def _fold(value: str) -> str:
@@ -38,6 +39,20 @@ class SessionAuthorizationPolicy:
         "computer_control",
         "external_communication",
     })
+
+    # File mutation is never granted by session/path state alone.  The user must
+    # explicitly ask for a create/modify/patch/copy/move operation in the current
+    # conversational turn.  Persistent path grants answer only *where* EPIS may
+    # write, never *whether* it may decide to write by itself.
+    FILE_MUTATION_CAPABILITIES = frozenset({
+        "files.write_text",
+        "files.patch_text",
+        "files.copy",
+        "files.move",
+        "repository.context_write",
+    })
+
+    REPOSITORY_BIND_CAPABILITY = "repository.bind"
 
     ALWAYS_CONFIRM = frozenset({
         "credential_entry",
@@ -85,6 +100,27 @@ class SessionAuthorizationPolicy:
         "scroll", "drag", "focus ",
     )
 
+    _FILE_MUTATION_TERMS = (
+        "degistir", "duzelt", "uygula", "guncelle", "kaydet", "save", "patch", "edit",
+        "olustur", "dosya yaz", "koda yaz", "ekle", "replace", "modify",
+        "update", "fix ", "fixle", "apply", "create", "rewrite",
+        "rename", "tasi", "move ", "copy", "kopyala",
+    )
+
+    _FILE_MUTATION_DENIAL_TERMS = (
+        "degistirme", "duzeltme", "uygulama", "yazma", "olusturma",
+        "dokunma", "sadece incele", "yalnizca incele", "only inspect",
+        "do not modify", "don't modify", "dont modify", "read only",
+        "salt okunur", "salt-okunur",
+    )
+
+    _REPOSITORY_BIND_TERMS = (
+        "repo artik burada", "repo burada", "bunu ana repo yap",
+        "bunu canonical repo yap", "canonical repo", "kanonik repo",
+        "repo now here", "make this the repo", "make this canonical repo",
+        "set this repo", "set repository",
+    )
+
     _CATEGORY_CONTEXT = {
         "external_communication": (
             "mesaj", "message", "mail", "email", "yorum", "comment",
@@ -98,21 +134,31 @@ class SessionAuthorizationPolicy:
 
     def __init__(self):
         self._grants: set[str] = set()
+        self._lock = threading.RLock()
 
     def reset(self) -> None:
-        self._grants.clear()
+        with self._lock:
+            self._grants.clear()
 
     def grants(self) -> set[str]:
-        return set(self._grants)
+        with self._lock:
+            return set(self._grants)
 
     def grant(self, category: str | None) -> bool:
         if category not in self.GRANTABLE:
             return False
-        self._grants.add(category)
+        with self._lock:
+            self._grants.add(category)
         return True
 
     @classmethod
     def classify(cls, capability: str, arguments: dict) -> str | None:
+        if capability in cls.FILE_MUTATION_CAPABILITIES:
+            return "file_mutation"
+
+        if capability == cls.REPOSITORY_BIND_CAPABILITY:
+            return "repository_binding"
+
         if capability != "computer.execute":
             return None
 
@@ -134,6 +180,8 @@ class SessionAuthorizationPolicy:
         text = _fold(user_message)
         if category == "external_communication":
             return any(term in text for term in cls._EXTERNAL_DENIAL_TERMS)
+        if category == "file_mutation":
+            return any(term in text for term in cls._FILE_MUTATION_DENIAL_TERMS)
         return False
 
     @classmethod
@@ -149,6 +197,10 @@ class SessionAuthorizationPolicy:
             return any(term in text for term in cls._EXTERNAL_ACTION_TERMS)
         if category == "computer_control":
             return any(term in text for term in cls._COMPUTER_ACTION_TERMS)
+        if category == "file_mutation":
+            return any(term in text for term in cls._FILE_MUTATION_TERMS)
+        if category == "repository_binding":
+            return any(term in text for term in cls._REPOSITORY_BIND_TERMS)
         return False
 
     @classmethod
@@ -176,6 +228,30 @@ class SessionAuthorizationPolicy:
                 category, False, "always_confirm", False, always_confirm=True
             )
 
+        # File mutation is deliberately non-grantable.  A path grant can remove
+        # repeated *filesystem scope* approvals, but the current message still
+        # has to authorize mutation every time.
+        if category == "file_mutation":
+            if self._explicit_current_turn(category, user_message):
+                return AuthorizationDecision(
+                    category, True, "explicit_current_turn", False
+                )
+            return AuthorizationDecision(
+                category, False, "explicit_mutation_required", False
+            )
+
+        # Canonical repository binding is a persistent application setting, not
+        # a source edit.  It is still permitted only when the current message
+        # explicitly asks to adopt that repository/location.
+        if category == "repository_binding":
+            if self._explicit_current_turn(category, user_message):
+                return AuthorizationDecision(
+                    category, True, "explicit_current_turn", False
+                )
+            return AuthorizationDecision(
+                category, False, "explicit_repository_binding_required", False
+            )
+
         if self._explicit_current_turn(category, user_message):
             return AuthorizationDecision(
                 category,
@@ -184,7 +260,10 @@ class SessionAuthorizationPolicy:
                 category in self.GRANTABLE,
             )
 
-        if category in self._grants and self._session_context_relevant(category, user_message):
+        with self._lock:
+            session_granted = category in self._grants
+
+        if session_granted and self._session_context_relevant(category, user_message):
             return AuthorizationDecision(
                 category, True, "session_category_grant", True
             )

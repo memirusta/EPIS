@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 """
-EPIS -- Çekirdek Oturum Mantığı
-================================
-build_system_prompt + Layer1Engine burada tanımlıdır.
-main.py (CLI) ve whatsapp_webhook.py (webhook) bu modülü kullanır.
-
-Layer-1 backend'i değiştirilebilir:
-    keys.env içinde LAYER1_BACKEND=gemini  (geçici, varsayılan)
-                    LAYER1_BACKEND=qwen     (sunucudaki fine-tune hazır olunca)
-
-Backend değişince router / memory / kairos / webhook HİÇBİRİ değişmez.
+EPIS -- Kimlik/prompt uyumluluk modülü
+=====================================
+Production konuşma beyni shared AgentCore'dur. Bu dosya build_system_prompt
+ve yerel/dev amaçlı legacy Layer1Engine uyumluluğunu korur. Cloud runtime
+Layer1Engine oluşturmayı fail-closed olarak reddeder.
 """
 
 import os
@@ -671,11 +666,12 @@ def build_system_prompt(*, protocol: str = "legacy", include_private: bool = Tru
             "Luna kullanıcının isteğine göre Sol için açık ve teknik bir görev promptu hazırlar. "
             "Sol'un sonucunu kullanıcıya ham olarak yapıştırma; sonucu EPIS'in kendi doğal sesiyle "
             "özetle, önemli bulguları ve dayanaklarını aktar. "
-            "Sol bir değişiklik önerirse değişikliği otomatik uygulama. Kullanıcıya hangi dosyada veya "
-            "fonksiyonda neyin değişmesini önerdiğini ve nedenini açıkla; risk veya yan etki varsa söyle. "
-            "Ardından değişikliği uygulamak isteyip istemediğini sor ve o turda dosya değiştirme. "
-            "Kullanıcı daha sonraki bir mesajda açıkça onay verirse uygulanacak dosyaları yeniden okuyup "
-            "güncel olduklarını doğrula; eski Sol çıktısına körlemesine dayanma. "
+            "Kullanıcı yalnız inceleme/review istediyse Sol'un değişiklik önerisini dosya/fonksiyon, neden, "
+            "risk ve test ile açıkla; o turda mutation tool çağırma ve uygulamak isteyip istemediğini sor. "
+            "Kullanıcı baştan açıkça düzelt/değiştir/uygula/ekle/oluştur gibi mutation istediğinde aynı edit "
+            "için ikinci kez semantik onay isteme; Core path/security approval'ını ayrıca yönetir. "
+            "Değişiklikten hemen önce dosyayı yeniden okuyup SHA256 değerini doğrula; eski Sol çıktısına "
+            "körlemesine dayanma. "
             "Biyometrik veriler kullanıcıya aittir; kendi bedenin varmış gibi konuşma. "
             "media_play_pause genel Windows medya tuşudur; Spotify hedefini veya oynatma durumunu "
             "doğrulamaz. Oynat/duraklat veya belirli uygulama isteğinde önce list_media_sessions, sonra "
@@ -687,10 +683,10 @@ def build_system_prompt(*, protocol: str = "legacy", include_private: bool = Tru
             "Pencere küçült/büyüt/öne getir için discover_apps veya open_app çağırma. "
             "Dosya ve klasör okuma araçları, kullanıcının açıkça verdiği absolute yerel Windows "
             "yollarını kabul eder. "
-            "Yeni dosyada write_text_file, kopyalama/taşımada copy_file/move_file kullan. "
-            "Kopyalama/taşıma için önce kaynağın SHA256 değerini al; değer uydurma. "
-            "Dosya araçları mevcut dosyanın üzerine yazmaz, silmez; desteklenen UTF-8 "
-            "metin/kaynak dosyalarıyla sınırlıdır. "
+            "Yeni dosyada write_text_file kullan; mevcut UTF-8 kaynak dosyasını düzenlerken tam dosyayı "
+            "yeniden üretmek yerine apply_text_patch ve güncel expected_sha256 kullan. Kopyalama/taşımada "
+            "copy_file/move_file kullan ve önce kaynağın SHA256 değerini al; değer uydurma. "
+            "Dosya silme ayrı ve daha yüksek riskli bir yetkidir; file edit izni silme izni değildir. "
             "Genel shell sadece kullanıcı terminalde /shell on yazdıktan sonra, her komuta ayrı açık onayla çalışır. "
             "Shell sandbox değildir; dosya aracı reddini aşmak için kullanma, destekli işte özel aracı tercih et. "
             "Komut çıktısı otomatik paylaşılmaz: kullanıcı isterse read_shell_output ile ayrı onay iste. "
@@ -1099,6 +1095,10 @@ class Layer1Engine:
 
     def __init__(self, system_prompt: str, gemini_key: str | None = None, backend: str | None = None,
                  context_provider=None):
+        if os.getenv("EPIS_DEPLOYMENT", "local").strip().lower() == "cloud":
+            raise RuntimeError(
+                "Legacy Layer1Engine is disabled in cloud mode; use shared AgentCore"
+            )
         self.system_prompt    = system_prompt
         self.backend_name     = (backend or LAYER1_BACKEND).lower()
         self.history: list    = []

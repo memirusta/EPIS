@@ -38,3 +38,9 @@ __pycache__/
 .idea/
 .DS_Store
 Thumbs.db
+
+# EPIS generated repository intelligence / temporary patch artifacts
+.epis/
+*.bak
+*.orig
+*.rej

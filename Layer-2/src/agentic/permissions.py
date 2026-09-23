@@ -68,6 +68,7 @@ AUTO_CONFIRM_CAPABILITIES = frozenset({
     "files.info",
     "files.read_text",
     "files.open_folder",
+    "repository.inspect",
 })
 
 

@@ -25,14 +25,19 @@ class EpisController extends ChangeNotifier {
   EpisConnectionStatus connection = EpisConnectionStatus.offline;
   String serverVersion = '';
   String? error;
-  bool waiting = false;
   bool bootstrapped = false;
   final List<ChatMessage> messages = [];
   final List<DeviceSnapshot> devices = [];
-  ApprovalRequest? approval;
+  final List<ApprovalRequest> approvals = [];
+  final Set<String> _inFlightRequests = <String>{};
+  final Set<String> _approvalSubmitting = <String>{};
+  Completer<void>? _deviceRefreshCompleter;
 
   EpisServerConfig get config => _config;
   bool get hasCredentials => _config.isReady;
+  bool get waiting => _inFlightRequests.isNotEmpty;
+  ApprovalRequest? get approval => approvals.isEmpty ? null : approvals.first;
+  int get activeRequestCount => _inFlightRequests.length;
   bool get pcAgentOnline =>
       devices.any((d) => d.online && d.platform.toLowerCase() == 'windows');
 
@@ -43,11 +48,26 @@ class EpisController extends ChangeNotifier {
     if (_config.isReady) unawaited(_client.connect(_config));
   }
 
+  String? _normalizeCloudUrl(String raw) {
+    final parsed = Uri.tryParse(raw.trim());
+    if (parsed == null ||
+        parsed.scheme.toLowerCase() != 'wss' ||
+        parsed.host.isEmpty ||
+        parsed.userInfo.isNotEmpty ||
+        parsed.hasQuery ||
+        parsed.hasFragment) {
+      return null;
+    }
+    final path = parsed.path.isEmpty || parsed.path == '/' ? '/ws' : parsed.path;
+    if (path != '/ws') return null;
+    return parsed.replace(path: '/ws').toString();
+  }
+
   Future<void> saveConfig({required String url, required String token}) async {
-    final normalizedUrl = url.trim();
+    final normalizedUrl = _normalizeCloudUrl(url);
     final normalizedToken = token.trim();
-    if (!normalizedUrl.startsWith('wss://')) {
-      error = 'Cloud EPIS bağlantısı wss:// kullanmalı.';
+    if (normalizedUrl == null) {
+      error = 'Cloud EPIS adresi wss://host/ws biçiminde olmalı; URL içinde kullanıcı bilgisi, query veya fragment bulunamaz.';
       notifyListeners();
       return;
     }
@@ -57,7 +77,13 @@ class EpisController extends ChangeNotifier {
       return;
     }
     final next = EpisServerConfig(url: normalizedUrl, token: normalizedToken);
-    await _configStore.write(next);
+    try {
+      await _configStore.write(next);
+    } catch (_) {
+      error = 'EPIS bağlantı ayarları güvenli depoya kaydedilemedi.';
+      notifyListeners();
+      return;
+    }
     _config = next;
     error = null;
     notifyListeners();
@@ -69,54 +95,108 @@ class EpisController extends ChangeNotifier {
     _config = _config.copyWith(token: '');
     messages.clear();
     devices.clear();
-    approval = null;
-    waiting = false;
+    approvals.clear();
+    _inFlightRequests.clear();
+    _approvalSubmitting.clear();
     error = null;
     await _client.disconnect();
     notifyListeners();
   }
 
-  void sendMessage(String text) {
+  bool sendMessage(String text) {
     final value = text.trim();
-    if (value.isEmpty || waiting || connection != EpisConnectionStatus.online) {
-      return;
+    if (value.isEmpty || connection != EpisConnectionStatus.online) {
+      return false;
     }
+
+    final requestId = _client.sendChat(value);
+    if (requestId == null) {
+      error = 'Mesaj server bağlantısına yazılamadı.';
+      notifyListeners();
+      return false;
+    }
+
     messages.add(ChatMessage(role: ChatRole.user, text: value));
-    waiting = true;
+    _inFlightRequests.add(requestId);
     error = null;
     notifyListeners();
-    _client.sendChat(value);
+    return true;
   }
 
   void confirmApproval() {
     final current = approval;
-    if (current == null || waiting) return;
-    approval = null;
-    waiting = true;
+    if (current == null || _approvalSubmitting.contains(current.id)) return;
+
+    final operationId = _client.confirmApproval(current.id);
+    if (operationId == null) {
+      error = 'Onay server bağlantısına yazılamadı.';
+      notifyListeners();
+      return;
+    }
+
+    _approvalSubmitting.add(current.id);
+    error = null;
     notifyListeners();
-    _client.confirmApproval(current.id);
   }
 
   void rejectApproval() {
     final current = approval;
-    if (current == null || waiting) return;
-    approval = null;
-    waiting = true;
+    if (current == null || _approvalSubmitting.contains(current.id)) return;
+
+    final operationId = _client.rejectApproval(current.id);
+    if (operationId == null) {
+      error = 'Red cevabı server bağlantısına yazılamadı.';
+      notifyListeners();
+      return;
+    }
+
+    _approvalSubmitting.add(current.id);
+    error = null;
     notifyListeners();
-    _client.rejectApproval(current.id);
   }
 
   void newConversation() {
-    if (waiting || connection != EpisConnectionStatus.online) return;
-    waiting = true;
-    approval = null;
+    if (connection != EpisConnectionStatus.online) return;
+
+    final requestId = _client.newConversation();
+    if (requestId == null) {
+      error = 'Yeni bağlam isteği server bağlantısına yazılamadı.';
+      notifyListeners();
+      return;
+    }
+
+    _inFlightRequests.add(requestId);
     error = null;
     notifyListeners();
-    _client.newConversation();
   }
 
-  void refreshDevices() {
-    if (connection == EpisConnectionStatus.online) _client.requestDevices();
+  Future<void> refreshDevices() async {
+    if (connection != EpisConnectionStatus.online) return;
+
+    final previous = _deviceRefreshCompleter;
+    if (previous != null && !previous.isCompleted) previous.complete();
+    final completer = Completer<void>();
+    _deviceRefreshCompleter = completer;
+
+    if (!_client.requestDevices()) {
+      _deviceRefreshCompleter = null;
+      error = 'Cihaz listesi isteği server bağlantısına yazılamadı.';
+      notifyListeners();
+      return;
+    }
+
+    try {
+      await completer.future.timeout(const Duration(seconds: 5));
+    } on TimeoutException {
+      if (identical(_deviceRefreshCompleter, completer)) {
+        error = 'Cihaz listesi zamanında yenilenemedi.';
+        notifyListeners();
+      }
+    } finally {
+      if (identical(_deviceRefreshCompleter, completer)) {
+        _deviceRefreshCompleter = null;
+      }
+    }
   }
 
   void reconnect() {
@@ -125,17 +205,35 @@ class EpisController extends ChangeNotifier {
 
   void _handleConnection(EpisConnectionStatus next) {
     connection = next;
-    if (next != EpisConnectionStatus.online) waiting = false;
     notifyListeners();
+  }
+
+  void _queueApproval(ApprovalRequest request) {
+    approvals.removeWhere((item) => item.id == request.id);
+    approvals.add(request);
+  }
+
+  void _finishRequest(Object? requestId) {
+    if (requestId is String) {
+      _inFlightRequests.remove(requestId);
+    }
   }
 
   void _handlePayload(Map<String, dynamic> payload) {
     switch (payload['type']) {
       case 'connected':
         serverVersion = payload['version']?.toString() ?? '';
+        break;
+
+      case 'client.ready':
         connection = EpisConnectionStatus.online;
         error = null;
         break;
+
+      case 'chat.accepted':
+      case 'conversation.accepted':
+        break;
+
       case 'assistant.message':
         final text = payload['text']?.toString().trim() ?? '';
         final results = <Map<String, dynamic>>[];
@@ -155,11 +253,28 @@ class EpisController extends ChangeNotifier {
           );
         }
         if (payload['confirmation_required'] == true) {
-          approval = ApprovalRequest.tryParse(payload['approval']);
-          if (approval == null) error = 'Onay isteği okunamadı.';
+          final parsed = ApprovalRequest.tryParse(payload['approval']);
+          if (parsed == null) {
+            error = 'Onay isteği okunamadı.';
+          } else {
+            _queueApproval(parsed);
+          }
         }
-        waiting = false;
+        _finishRequest(payload['request_id']);
         break;
+
+      case 'approval.accepted':
+        final approvalId = payload['approval_id'];
+        if (approvalId is String) {
+          approvals.removeWhere((item) => item.id == approvalId);
+          _approvalSubmitting.remove(approvalId);
+        }
+        final requestId = payload['request_id'];
+        if (requestId is String && requestId.isNotEmpty) {
+          _inFlightRequests.add(requestId);
+        }
+        break;
+
       case 'devices.snapshot':
         final raw = payload['devices'];
         if (raw is List) {
@@ -169,20 +284,34 @@ class EpisController extends ChangeNotifier {
               raw.map(DeviceSnapshot.tryParse).whereType<DeviceSnapshot>(),
             );
         }
+        final refresh = _deviceRefreshCompleter;
+        if (refresh != null && !refresh.isCompleted) refresh.complete();
+        if (error == 'Cihaz listesi zamanında yenilenemedi.' ||
+            error == 'Cihaz listesi isteği server bağlantısına yazılamadı.') {
+          error = null;
+        }
         break;
+
       case 'conversation.reset':
         messages.clear();
-        approval = null;
-        waiting = false;
+        approvals.clear();
+        _approvalSubmitting.clear();
+        _inFlightRequests.clear();
         error = null;
         break;
+
       case 'error':
-        waiting = false;
+        _finishRequest(payload['request_id']);
+        final approvalId = payload['approval_id'];
+        if (approvalId is String) {
+          _approvalSubmitting.remove(approvalId);
+        }
         error =
             payload['detail']?.toString() ??
             payload['error']?.toString() ??
             'Bilinmeyen EPIS server hatası.';
         break;
+
       case 'pong':
         break;
     }
@@ -191,6 +320,8 @@ class EpisController extends ChangeNotifier {
 
   @override
   void dispose() {
+    final refresh = _deviceRefreshCompleter;
+    if (refresh != null && !refresh.isCompleted) refresh.complete();
     unawaited(_client.dispose());
     super.dispose();
   }

@@ -4,7 +4,7 @@ EPIS -- Kairos: Proaktif Motor
 ================================
 Zamanlar habits.json'dan okunur.
 Uyku Mi Band 6 (Gadgetbridge) ile tespit edilir.
-Cikti pending.json'a yazilir; aninda EPIS sesiyle WhatsApp'a push edilir.
+Cikti pending.json'a yazilir; mesaj tek shared AgentCore uzerinden uretilip teslim edilir.
 
 Calistirma : python kairos.py
 """
@@ -63,7 +63,7 @@ class Kairos:
             f"Gadgetbridge: {'aktif' if self.gadgetbridge.is_available() else 'DB yok'}. "
             f"PC ekran: {'aktif' if self.screen.is_available() else 'pywin32 eksik'}. "
             f"Telefon: {'aktif' if self.phone.is_available() else 'ADB kapali'}. "
-            f"WA push: {'aktif' if self.proactive.ui.is_ready() else 'UI kapali'} "
+            f"Shared runtime: {'aktif' if self.proactive.runtime.is_ready() else 'bagli degil'} "
             f"(kanal: {self.proactive._channel()})"
         )
 

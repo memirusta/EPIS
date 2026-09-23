@@ -9,10 +9,7 @@ class DevicesScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return RefreshIndicator(
-      onRefresh: () async {
-        controller.refreshDevices();
-        await Future<void>.delayed(const Duration(milliseconds: 400));
-      },
+      onRefresh: controller.refreshDevices,
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -25,7 +22,7 @@ class DevicesScreen extends StatelessWidget {
                 ),
               ),
               IconButton(
-                onPressed: controller.refreshDevices,
+                onPressed: () => controller.refreshDevices(),
                 icon: const Icon(Icons.refresh),
               ),
             ],

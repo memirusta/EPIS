@@ -16,6 +16,7 @@ from .devices import DeviceRegistry, LocalDeviceAgent, UnavailableDeviceAgent
 from .hot_memory import HotConversationStore
 from .luna import OpenAILunaClient, OpenAISolClient
 from .permissions import PermissionEngine
+from .runtime_memory import CloudRuntimeMemory
 from .tools import build_local_registry
 from .transport import StdioDeviceAgent
 from .tasks import TaskStore
@@ -37,7 +38,17 @@ def create_core() -> AgentCore:
             "Unknown context mode"
         )
 
-    memory = MemoryManager()
+    if cloud_mode and mode != "minimal":
+        raise ValueError(
+            "Cloud EPIS may use only minimal automatic context; "
+            "personal context must come from the trusted device capability"
+        )
+
+    memory = (
+        CloudRuntimeMemory()
+        if cloud_mode
+        else MemoryManager()
+    )
 
     # ------------------------------------------------------------------
     # HOT CONVERSATION MEMORY

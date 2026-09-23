@@ -47,7 +47,8 @@ class EpisCipher:
     """AES-256-GCM sifreleyici. enc:v1: oneki ile isaretli token uretir."""
 
     def __init__(self, key: bytes | None, enabled: bool):
-        self.enabled = enabled and key is not None
+        self.required = bool(enabled)
+        self.enabled = self.required and key is not None
         self._key    = key
         self._aesgcm = None
 
@@ -62,16 +63,20 @@ class EpisCipher:
     # ------------------------------------------------------------------
 
     def encrypt_str(self, plaintext: str) -> str:
-        """Metni sifreler ve 'enc:v1:<base64>' doner. Devre disiysa metni aynen doner."""
-        if not self.enabled or plaintext is None or plaintext == "":
+        """Encrypt text; never silently downgrade a required write to plaintext."""
+        if plaintext is None or plaintext == "":
             return plaintext
+        if not self.required:
+            return plaintext
+        if not self.enabled or self._aesgcm is None:
+            raise RuntimeError("EPIS encryption is required but unavailable")
         try:
             nonce = os.urandom(12)
             ct    = self._aesgcm.encrypt(nonce, plaintext.encode("utf-8"), None)
             return ENC_PREFIX + base64.b64encode(nonce + ct).decode("ascii")
         except Exception as e:
             logger.error(f"Sifreleme hatasi: {e}")
-            return plaintext
+            raise RuntimeError("EPIS encryption failed") from e
 
     def decrypt_str(self, value: str) -> str:
         """
@@ -148,8 +153,10 @@ def get_cipher() -> EpisCipher:
         _cipher_singleton = EpisCipher(key=key, enabled=ENCRYPTION_ENABLED)
         if _cipher_singleton.enabled:
             logger.info("Sifreleme katmani aktif (AES-256-GCM).")
+        elif ENCRYPTION_ENABLED:
+            logger.error("Sifreleme zorunlu ama kullanilamiyor; hassas yazmalar fail-closed olacak.")
         else:
-            logger.info("Sifreleme katmani devre disi -- duz metin.")
+            logger.info("Sifreleme kullanici tarafindan acikca devre disi birakildi.")
     return _cipher_singleton
 
 
@@ -186,7 +193,7 @@ def save_json_file(path: str, data: dict, encrypt: bool = True):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     plaintext = json.dumps(data, ensure_ascii=False, indent=2)
     cipher    = get_cipher()
-    if encrypt and cipher.enabled:
+    if encrypt:
         out = cipher.encrypt_str(plaintext)
     else:
         out = plaintext

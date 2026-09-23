@@ -38,8 +38,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _save() async {
     setState(() => _saving = true);
-    await widget.controller.saveConfig(url: _url.text, token: _token.text);
-    if (mounted) setState(() => _saving = false);
+    try {
+      await widget.controller.saveConfig(url: _url.text, token: _token.text);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   @override
@@ -156,7 +159,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             const SizedBox(height: 10),
             const Text(
-              'Sonraki aşama: Desktop QR / tek kullanımlık kod pairing.',
+              'İleride Desktop QR / tek kullanımlık kod ile pairing eklenebilir.',
               style: TextStyle(fontSize: 9, color: Color(0xFF62656F)),
             ),
           ],

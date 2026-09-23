@@ -14,14 +14,42 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final _text = TextEditingController();
   final _scroll = ScrollController();
+  int _lastMessageCount = 0;
+  String? _lastApprovalId;
+  bool _nearBottom = true;
 
   @override
   void initState() {
     super.initState();
+    _lastMessageCount = widget.controller.messages.length;
+    _lastApprovalId = widget.controller.approval?.id;
+    _scroll.addListener(_trackScrollPosition);
     widget.controller.addListener(_syncScroll);
   }
 
+  void _trackScrollPosition() {
+    if (!_scroll.hasClients) return;
+    _nearBottom =
+        (_scroll.position.maxScrollExtent - _scroll.position.pixels) < 120;
+  }
+
   void _syncScroll() {
+    final controller = widget.controller;
+    final messageCount = controller.messages.length;
+    final approvalId = controller.approval?.id;
+    final newMessage = messageCount > _lastMessageCount;
+    final newApproval = approvalId != null && approvalId != _lastApprovalId;
+    final userJustSent = newMessage &&
+        controller.messages.isNotEmpty &&
+        controller.messages.last.role == ChatRole.user;
+
+    _lastMessageCount = messageCount;
+    _lastApprovalId = approvalId;
+
+    if (!(userJustSent || (_nearBottom && (newMessage || newApproval)))) {
+      return;
+    }
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scroll.hasClients) {
         _scroll.animateTo(
@@ -36,13 +64,15 @@ class _ChatScreenState extends State<ChatScreen> {
   void _send() {
     final value = _text.text.trim();
     if (value.isEmpty) return;
-    widget.controller.sendMessage(value);
-    if (widget.controller.waiting) _text.clear();
+    if (widget.controller.sendMessage(value)) {
+      _text.clear();
+    }
   }
 
   @override
   void dispose() {
     widget.controller.removeListener(_syncScroll);
+    _scroll.removeListener(_trackScrollPosition);
     _text.dispose();
     _scroll.dispose();
     super.dispose();
@@ -216,13 +246,13 @@ class _ChatScreenState extends State<ChatScreen> {
               children: [
                 IconButton(
                   tooltip: 'Yeni bağlam',
-                  onPressed: online && !c.waiting ? c.newConversation : null,
+                  onPressed: online ? c.newConversation : null,
                   icon: const Icon(Icons.add_comment_outlined),
                 ),
                 Expanded(
                   child: TextField(
                     controller: _text,
-                    enabled: online && !c.waiting,
+                    enabled: online,
                     minLines: 1,
                     maxLines: 5,
                     textInputAction: TextInputAction.send,
@@ -242,7 +272,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
                 const SizedBox(width: 8),
                 IconButton.filled(
-                  onPressed: online && !c.waiting ? _send : null,
+                  onPressed: online ? _send : null,
                   icon: const Icon(Icons.arrow_upward),
                 ),
               ],

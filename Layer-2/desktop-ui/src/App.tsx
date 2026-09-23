@@ -19,6 +19,9 @@ type AgentConnectionState = "connecting" | "online" | "offline";
 type ApprovalRequest = {
   id: string;
   message: string;
+  requestId: string;
+  clientId?: string;
+  originDeviceId?: string;
   tool?: string;
   capability?: string;
   risk?: string;
@@ -120,13 +123,27 @@ type UsageSnapshot = {
   warning: string | null;
 };
 
-const CHAT_STORAGE_KEY = "epis.desktop.chat.v1";
+const CHAT_STORAGE_KEY = "epis.desktop.chat.v2";
+const LEGACY_CHAT_STORAGE_KEY = "epis.desktop.chat.v1";
+const MAX_PERSISTED_MESSAGES = 80;
+const MAX_PERSISTED_TEXT_CHARS = 12000;
 
 let messageId = 0;
 
 function nextMessageId() {
   messageId += 1;
   return messageId;
+}
+
+let protocolIdCounter = 0;
+
+function nextProtocolId(prefix: string): string {
+  protocolIdCounter += 1;
+  const random =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `${prefix}:${random}:${protocolIdCounter}`;
 }
 
 function asApprovalRequest(value: unknown): ApprovalRequest | null {
@@ -136,13 +153,23 @@ function asApprovalRequest(value: unknown): ApprovalRequest | null {
 
   const item = value as Record<string, unknown>;
 
-  if (typeof item.id !== "string" || typeof item.message !== "string") {
+  if (
+    typeof item.id !== "string" ||
+    typeof item.message !== "string" ||
+    typeof item.request_id !== "string"
+  ) {
     return null;
   }
 
   return {
     id: item.id,
     message: item.message,
+    requestId: item.request_id,
+    clientId: typeof item.client_id === "string" ? item.client_id : undefined,
+    originDeviceId:
+      typeof item.origin_device_id === "string"
+        ? item.origin_device_id
+        : undefined,
     tool: typeof item.tool === "string" ? item.tool : undefined,
     capability:
       typeof item.capability === "string" ? item.capability : undefined,
@@ -164,7 +191,9 @@ function asObject(value: unknown): ToolResult | null {
 
 function loadStoredMessages(): Message[] {
   try {
-    const raw = window.localStorage.getItem(CHAT_STORAGE_KEY);
+    const raw =
+      window.localStorage.getItem(CHAT_STORAGE_KEY) ??
+      window.localStorage.getItem(LEGACY_CHAT_STORAGE_KEY);
 
     if (!raw) {
       return [];
@@ -185,10 +214,7 @@ function loadStoredMessages(): Message[] {
         continue;
       }
 
-      if (
-        item.role !== "user" &&
-        item.role !== "assistant"
-      ) {
+      if (item.role !== "user" && item.role !== "assistant") {
         continue;
       }
 
@@ -196,24 +222,14 @@ function loadStoredMessages(): Message[] {
         continue;
       }
 
-      const toolResults = Array.isArray(item.toolResults)
-        ? item.toolResults
-            .map(asObject)
-            .filter(
-              (tool): tool is ToolResult =>
-                tool !== null,
-            )
-        : undefined;
-
       restored.push({
         id: nextMessageId(),
         role: item.role,
-        text: item.text,
-        toolResults,
+        text: item.text.slice(0, MAX_PERSISTED_TEXT_CHARS),
       });
     }
 
-    return restored;
+    return restored.slice(-MAX_PERSISTED_MESSAGES);
   } catch {
     return [];
   }
@@ -371,7 +387,9 @@ function barHeight(hourly: UsageHour[], value: number): string {
 export default function App() {
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
+  const reconnectDelayRef = useRef(1000);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const clientIdRef = useRef<string>(nextProtocolId("desktop"));
 
   const [page, setPage] = useState<Page>("chat");
   const [connection, setConnection] =
@@ -384,9 +402,13 @@ export default function App() {
   const [messages, setMessages] =
     useState<Message[]>(loadStoredMessages);
   const [text, setText] = useState("");
-  const [waiting, setWaiting] = useState(false);
-  const [approvalPending, setApprovalPending] =
-    useState<ApprovalRequest | null>(null);
+  const [inFlightRequests, setInFlightRequests] =
+    useState<Set<string>>(() => new Set());
+  const [approvals, setApprovals] =
+    useState<ApprovalRequest[]>([]);
+  const [approvalSubmitting, setApprovalSubmitting] =
+    useState<Set<string>>(() => new Set());
+  const waiting = inFlightRequests.size > 0;
   const [usage, setUsage] = useState<UsageSnapshot | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageError, setUsageError] = useState<string | null>(null);
@@ -401,18 +423,17 @@ export default function App() {
 
   useEffect(() => {
     try {
+      const persisted = messages
+        .slice(-MAX_PERSISTED_MESSAGES)
+        .map(({ role, text }) => ({
+          role,
+          text: text.slice(0, MAX_PERSISTED_TEXT_CHARS),
+        }));
       window.localStorage.setItem(
         CHAT_STORAGE_KEY,
-        JSON.stringify(
-          messages.map(
-            ({ role, text, toolResults }) => ({
-              role,
-              text,
-              toolResults,
-            }),
-          ),
-        ),
+        JSON.stringify(persisted),
       );
+      window.localStorage.removeItem(LEGACY_CHAT_STORAGE_KEY);
     } catch {
       // UI persistence failure must not break chat.
     }
@@ -420,14 +441,58 @@ export default function App() {
 
   useEffect(() => {
     invoke<ServerConfig>("server_config")
-      .then(setServerConfig)
-      .catch(() => {
-        setServerConfig({
-          url: "ws://127.0.0.1:8000/ws",
-          token: "",
-        });
+      .then((config) => {
+        setServerConfig(config);
+        setError(null);
+      })
+      .catch((reason) => {
+        setServerConfig(null);
+        setConnection("offline");
+        setAgentConnection("offline");
+        setError(
+          `EPIS cloud configuration unavailable: ${String(reason)}`,
+        );
       });
   }, []);
+
+  function markInFlight(requestId: string) {
+    if (!requestId) return;
+    setInFlightRequests((current) => {
+      const next = new Set(current);
+      next.add(requestId);
+      return next;
+    });
+  }
+
+  function finishInFlight(requestId: unknown) {
+    if (typeof requestId !== "string" || !requestId) return;
+    setInFlightRequests((current) => {
+      if (!current.has(requestId)) return current;
+      const next = new Set(current);
+      next.delete(requestId);
+      return next;
+    });
+  }
+
+  function queueApproval(approval: ApprovalRequest) {
+    setApprovals((current) => {
+      const withoutOld = current.filter((item) => item.id !== approval.id);
+      return [...withoutOld, approval];
+    });
+  }
+
+  function removeApproval(approvalId: unknown) {
+    if (typeof approvalId !== "string") return;
+    setApprovals((current) =>
+      current.filter((item) => item.id !== approvalId),
+    );
+    setApprovalSubmitting((current) => {
+      if (!current.has(approvalId)) return current;
+      const next = new Set(current);
+      next.delete(approvalId);
+      return next;
+    });
+  }
 
   useEffect(() => {
     if (serverConfig === null) {
@@ -454,10 +519,17 @@ export default function App() {
           return;
         }
 
-        setConnection("online");
+        setConnection("connecting");
         setAgentConnection("connecting");
         setError(null);
-        ws.send(JSON.stringify({ type: "devices.get" }));
+        ws.send(
+          JSON.stringify({
+            type: "client.hello",
+            version: 2,
+            client_id: clientIdRef.current,
+            client_type: "desktop",
+          }),
+        );
       };
 
       ws.onmessage = (event) => {
@@ -469,8 +541,19 @@ export default function App() {
           const data = JSON.parse(event.data);
 
           if (data.type === "connected") {
-            setConnection("online");
             setServerVersion(data.version ?? "");
+            return;
+          }
+
+          if (data.type === "client.ready") {
+            reconnectDelayRef.current = 1000;
+            setConnection("online");
+            setError(null);
+            ws.send(JSON.stringify({ type: "devices.get" }));
+            return;
+          }
+
+          if (data.type === "chat.accepted") {
             return;
           }
 
@@ -501,11 +584,23 @@ export default function App() {
               if (approval === null) {
                 setError("Onay isteği okunamadı.");
               } else {
-                setApprovalPending(approval);
+                queueApproval(approval);
               }
             }
 
-            setWaiting(false);
+            finishInFlight(data.request_id);
+            return;
+          }
+
+          if (data.type === "approval.accepted") {
+            removeApproval(data.approval_id);
+            if (typeof data.request_id === "string") {
+              markInFlight(data.request_id);
+            }
+            return;
+          }
+
+          if (data.type === "conversation.accepted") {
             return;
           }
 
@@ -541,14 +636,24 @@ export default function App() {
 
           if (data.type === "conversation.reset") {
             setMessages([]);
-            setWaiting(false);
-            setApprovalPending(null);
+            setInFlightRequests(new Set());
+            setApprovals([]);
+            setApprovalSubmitting(new Set());
             setError(null);
             return;
           }
 
           if (data.type === "error") {
-            setWaiting(false);
+            finishInFlight(data.request_id);
+
+            if (typeof data.approval_id === "string") {
+              setApprovalSubmitting((current) => {
+                if (!current.has(data.approval_id)) return current;
+                const next = new Set(current);
+                next.delete(data.approval_id);
+                return next;
+              });
+            }
 
             setError(
               data.detail ??
@@ -559,7 +664,6 @@ export default function App() {
             return;
           }
         } catch {
-          setWaiting(false);
           setError(
             "Sunucudan ge\u00e7ersiz bir mesaj geldi.",
           );
@@ -582,11 +686,12 @@ export default function App() {
         socketRef.current = null;
         setConnection("offline");
         setAgentConnection("offline");
-        setWaiting(false);
 
+        const delay = reconnectDelayRef.current;
+        reconnectDelayRef.current = Math.min(delay * 2, 30000);
         reconnectTimerRef.current = window.setTimeout(
           connect,
-          1500,
+          delay + Math.floor(Math.random() * Math.min(delay, 1000)),
         );
       };
     }
@@ -641,7 +746,7 @@ export default function App() {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "devices.get" }));
       }
-    }, 5000);
+    }, 30000);
     return () => window.clearInterval(timer);
   }, [connection]);
 
@@ -658,7 +763,7 @@ export default function App() {
       behavior: "smooth",
       block: "end",
     });
-  }, [messages, waiting, approvalPending]);
+  }, [messages, waiting, approvals.length]);
 
   function sendPacket(packet: object) {
     const ws = socketRef.current;
@@ -678,22 +783,24 @@ export default function App() {
   function send() {
     const value = text.trim();
 
-    if (
-      !value ||
-      waiting
-    ) {
+    if (!value) {
       return;
     }
+
+    const requestId = nextProtocolId("chat");
 
     if (
       !sendPacket({
         type: "chat.send",
+        request_id: requestId,
+        origin_device_id: `desktop:${clientIdRef.current}`,
         text: value,
       })
     ) {
       return;
     }
 
+    markInFlight(requestId);
     setMessages((current) => [
       ...current,
       {
@@ -704,7 +811,6 @@ export default function App() {
     ]);
 
     setText("");
-    setWaiting(true);
     setError(null);
   }
 
@@ -721,37 +827,53 @@ export default function App() {
     }
   }
 
-  function approve() {
+  function approve(approval: ApprovalRequest) {
+    if (approvalSubmitting.has(approval.id)) {
+      return;
+    }
+
+    const operationId = nextProtocolId("approval");
+
     if (
-      waiting ||
-      !approvalPending ||
       !sendPacket({
         type: "approval.confirm",
-        approval_id: approvalPending.id,
+        approval_id: approval.id,
+        operation_id: operationId,
       })
     ) {
       return;
     }
 
-    setApprovalPending(null);
-    setWaiting(true);
+    setApprovalSubmitting((current) => {
+      const next = new Set(current);
+      next.add(approval.id);
+      return next;
+    });
     setError(null);
   }
 
-  function reject() {
+  function reject(approval: ApprovalRequest) {
+    if (approvalSubmitting.has(approval.id)) {
+      return;
+    }
+
+    const operationId = nextProtocolId("approval");
+
     if (
-      waiting ||
-      !approvalPending ||
       !sendPacket({
         type: "approval.reject",
-        approval_id: approvalPending.id,
+        approval_id: approval.id,
+        operation_id: operationId,
       })
     ) {
       return;
     }
 
-    setApprovalPending(null);
-    setWaiting(true);
+    setApprovalSubmitting((current) => {
+      const next = new Set(current);
+      next.add(approval.id);
+      return next;
+    });
     setError(null);
   }
 
@@ -770,20 +892,18 @@ export default function App() {
   }
 
   function clearContext() {
-    if (waiting) {
-      return;
-    }
+    const requestId = nextProtocolId("conversation");
 
     if (
       !sendPacket({
         type: "conversation.new",
+        request_id: requestId,
       })
     ) {
       return;
     }
 
-    setWaiting(true);
-    setApprovalPending(null);
+    markInFlight(requestId);
     setError(null);
   }
 
@@ -959,41 +1079,52 @@ export default function App() {
                       <span className="activity-spinner" />
 
                       <span>
-                        {"EPIS \u00e7al\u0131\u015f\u0131yor"}
+                        {inFlightRequests.size > 1
+                          ? `EPIS ${inFlightRequests.size} isteği çalıştırıyor`
+                          : "EPIS çalışıyor"}
                       </span>
                     </div>
                   </article>
                 )}
 
-                {approvalPending && (
-                  <section className="permission-card">
-                    <div className="permission-icon">
-                      !
-                    </div>
+                {approvals.map((approval) => {
+                  const submitting = approvalSubmitting.has(approval.id);
 
-                    <div className="permission-copy">
-                      <strong>Onay gerekiyor</strong>
+                  return (
+                    <section
+                      className="permission-card"
+                      key={approval.id}
+                    >
+                      <div className="permission-icon">
+                        !
+                      </div>
 
-                      <span>{approvalPending.message}</span>
-                    </div>
+                      <div className="permission-copy">
+                        <strong>Onay gerekiyor</strong>
 
-                    <div className="permission-actions">
-                      <button
-                        className="secondary"
-                        onClick={reject}
-                      >
-                        Hayır
-                      </button>
+                        <span>{approval.message}</span>
+                      </div>
 
-                      <button
-                        className="primary"
-                        onClick={approve}
-                      >
-                        Evet
-                      </button>
-                    </div>
-                  </section>
-                )}
+                      <div className="permission-actions">
+                        <button
+                          className="secondary"
+                          disabled={submitting}
+                          onClick={() => reject(approval)}
+                        >
+                          Hayır
+                        </button>
+
+                        <button
+                          className="primary"
+                          disabled={submitting}
+                          onClick={() => approve(approval)}
+                        >
+                          {submitting ? "Gönderiliyor..." : "Evet"}
+                        </button>
+                      </div>
+                    </section>
+                  );
+                })}
 
                 <div ref={bottomRef} />
               </div>
@@ -1004,10 +1135,7 @@ export default function App() {
             <div className="chat-actions">
               <button
                 onClick={clearContext}
-                disabled={
-                  waiting ||
-                  connection !== "online"
-                }
+                disabled={connection !== "online"}
               >
                 {"Ba\u011flam\u0131 temizle"}
               </button>
@@ -1041,7 +1169,7 @@ export default function App() {
 
               <textarea
                 value={text}
-                disabled={connection !== "online" || waiting}
+                disabled={connection !== "online"}
                 placeholder={
                   connection !== "online"
                     ? "Server ba\u011flant\u0131s\u0131 bekleniyor..."
@@ -1058,7 +1186,6 @@ export default function App() {
                 type="submit"
                 disabled={
                   !text.trim() ||
-                  waiting ||
                   connection !== "online"
                 }
               >
@@ -1273,7 +1400,7 @@ export default function App() {
               <article className="settings-card">
                 <div>
                   <strong>PC Agent</strong>
-                  <span>EPIS Desktop açıldığında Windows Agent sessizce başlar ve Heroku bağlantısını otomatik yeniden kurar.</span>
+                  <span>EPIS Desktop açıldığında Windows Agent sessizce başlar ve Cloud Core bağlantısını otomatik yeniden kurar.</span>
                 </div>
                 <span className={`settings-status ${agentConnection}`}>
                   {agentConnection === "online" ? "Connected" : agentConnection === "connecting" ? "Reconnecting" : "Offline"}
@@ -1307,7 +1434,7 @@ export default function App() {
             <div className="panel-kicker">MEMORY</div>
             <h1>Memory</h1>
             <p>{"Sohbet ge\u00e7mi\u015fi de\u011fil; EPIS'in kal\u0131c\u0131 memory ve identity katman\u0131 burada g\u00f6r\u00fcnecek."}</p>
-            <div className="not-connected-yet">{"Backend ba\u011flant\u0131s\u0131 sonraki a\u015famada"}</div>
+            <div className="not-connected-yet">{"Kalıcı memory görünümü henüz bu panele bağlanmadı; sohbet ve agent runtime bundan bağımsız çalışıyor."}</div>
           </section>
         </main>
       )}

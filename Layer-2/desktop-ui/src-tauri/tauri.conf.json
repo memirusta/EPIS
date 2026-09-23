@@ -26,8 +26,8 @@
     "targets": "all",
     "resources": {
       "../../src/agentic/*.py": "python/agentic/",
-      "../../src/server/*.py": "python/server/",
-      "../../../Layer-1/identity/*.md": "Layer-1/identity/"
+      "../../../Layer-1/identity/*.md": "Layer-1/identity/",
+      "../../src/server/cloud_device_agent.py": "python/server/cloud_device_agent.py"
     },
     "icon": [
       "icons/32x32.png",
