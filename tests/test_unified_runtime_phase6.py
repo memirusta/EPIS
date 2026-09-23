@@ -21,7 +21,8 @@ class UnifiedRuntimePhase6Tests(unittest.TestCase):
         self.assertIn('MAX_PERSISTED_MESSAGES = 80', app)
         self.assertIn('.slice(-MAX_PERSISTED_MESSAGES)', app)
         self.assertIn('.map(({ role, text }) => ({', app)
-        self.assertIn('removeItem(LEGACY_CHAT_STORAGE_KEY)', app)
+        self.assertIn('LEGACY_CHAT_STORAGE_KEYS', app)
+        self.assertIn('window.localStorage.removeItem(key)', app)
         self.assertNotIn('({ role, text, toolResults }) => ({', app)
 
     def test_mobile_has_no_hard_coded_cloud_deployment_url(self):

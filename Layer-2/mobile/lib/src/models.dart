@@ -86,12 +86,45 @@ class ChatMessage {
     required this.text,
     this.toolResults = const [],
     this.attachments = const [],
+    this.messageId,
+    this.requestId,
+    this.seq,
+    this.createdAt,
+    this.dayId,
   });
 
   final ChatRole role;
   final String text;
   final List<Map<String, dynamic>> toolResults;
   final List<ChatAttachmentSummary> attachments;
+  final String? messageId;
+  final String? requestId;
+  final int? seq;
+  final String? createdAt;
+  final String? dayId;
+
+  ChatMessage copyWith({
+    ChatRole? role,
+    String? text,
+    List<Map<String, dynamic>>? toolResults,
+    List<ChatAttachmentSummary>? attachments,
+    String? messageId,
+    String? requestId,
+    int? seq,
+    String? createdAt,
+    String? dayId,
+  }) =>
+      ChatMessage(
+        role: role ?? this.role,
+        text: text ?? this.text,
+        toolResults: toolResults ?? this.toolResults,
+        attachments: attachments ?? this.attachments,
+        messageId: messageId ?? this.messageId,
+        requestId: requestId ?? this.requestId,
+        seq: seq ?? this.seq,
+        createdAt: createdAt ?? this.createdAt,
+        dayId: dayId ?? this.dayId,
+      );
 }
 
 class ApprovalRequest {

@@ -37,6 +37,7 @@ class EpisController extends ChangeNotifier {
   final Set<String> _inFlightRequests = <String>{};
   final Set<String> _approvalSubmitting = <String>{};
   final Map<String, ChatMessage> _pendingUserMessages = {};
+  String? _activeDayId;
   Completer<void>? _deviceRefreshCompleter;
 
   EpisServerConfig get config => _config;
@@ -138,6 +139,7 @@ class EpisController extends ChangeNotifier {
       role: ChatRole.user,
       text: displayText,
       attachments: attachments.map((item) => item.summary).toList(),
+      requestId: requestId,
     );
     messages.add(optimistic);
     _pendingUserMessages[requestId] = optimistic;
@@ -278,39 +280,97 @@ class EpisController extends ChangeNotifier {
     }
   }
 
+  ChatMessage? _parseConversationMessage(Object? value) {
+    if (value is! Map) return null;
+    final map = Map<String, dynamic>.from(value);
+    final role = map['role'];
+    final text = map['text']?.toString() ?? '';
+    if (role != 'user' && role != 'assistant') return null;
+    final attachments = <ChatAttachmentSummary>[];
+    final rawAttachments = map['attachments'];
+    if (rawAttachments is List) {
+      for (final item in rawAttachments) {
+        final parsed = ChatAttachmentSummary.tryParse(item);
+        if (parsed != null) attachments.add(parsed);
+      }
+    }
+    if (text.trim().isEmpty && attachments.isEmpty) return null;
+    final seqValue = map['seq'];
+    return ChatMessage(
+      role: role == 'user' ? ChatRole.user : ChatRole.assistant,
+      text: text.trim(),
+      attachments: attachments,
+      messageId: map['message_id'] is String ? map['message_id'] as String : null,
+      requestId: map['request_id'] is String ? map['request_id'] as String : null,
+      seq: seqValue is num ? seqValue.toInt() : null,
+      createdAt: map['created_at'] is String ? map['created_at'] as String : null,
+      dayId: map['day_id'] is String ? map['day_id'] as String : null,
+    );
+  }
+
   List<ChatMessage> _parseConversationSnapshot(Object? value) {
     if (value is! List) return const [];
-    final result = <ChatMessage>[];
-    for (final raw in value) {
-      if (raw is! Map) continue;
-      final map = Map<String, dynamic>.from(raw);
-      final role = map['role'];
-      final text = map['text']?.toString() ?? '';
-      if (role != 'user' && role != 'assistant') continue;
-      final attachments = <ChatAttachmentSummary>[];
-      final rawAttachments = map['attachments'];
-      if (rawAttachments is List) {
-        for (final item in rawAttachments) {
-          final parsed = ChatAttachmentSummary.tryParse(item);
-          if (parsed != null) attachments.add(parsed);
-        }
-      }
-      if (text.trim().isEmpty && attachments.isEmpty) continue;
-      result.add(
-        ChatMessage(
-          role: role == 'user' ? ChatRole.user : ChatRole.assistant,
-          text: text.trim(),
-          attachments: attachments,
-        ),
-      );
+    return value
+        .map(_parseConversationMessage)
+        .whereType<ChatMessage>()
+        .toList(growable: false);
+  }
+
+  bool _sameCanonicalMessage(ChatMessage left, ChatMessage right) {
+    if (left.messageId != null && right.messageId != null) {
+      return left.messageId == right.messageId;
     }
-    return result;
+    if (left.requestId != null &&
+        right.requestId != null &&
+        left.role == right.role) {
+      return left.requestId == right.requestId;
+    }
+    return false;
+  }
+
+  void _mergeCanonicalMessage(ChatMessage incoming) {
+    if (incoming.dayId != null &&
+        _activeDayId != null &&
+        incoming.dayId != _activeDayId) {
+      _activeDayId = incoming.dayId;
+      messages
+        ..clear()
+        ..add(incoming);
+      return;
+    }
+    _activeDayId ??= incoming.dayId;
+    final index = messages.indexWhere(
+      (item) => _sameCanonicalMessage(item, incoming),
+    );
+    if (index < 0) {
+      messages.add(incoming);
+      return;
+    }
+    final current = messages[index];
+    messages[index] = current.copyWith(
+      role: incoming.role,
+      text: incoming.text,
+      toolResults: incoming.toolResults.isNotEmpty
+          ? incoming.toolResults
+          : current.toolResults,
+      attachments: incoming.attachments.isNotEmpty
+          ? incoming.attachments
+          : current.attachments,
+      messageId: incoming.messageId,
+      requestId: incoming.requestId,
+      seq: incoming.seq,
+      createdAt: incoming.createdAt,
+      dayId: incoming.dayId,
+    );
   }
 
   void _handlePayload(Map<String, dynamic> payload) {
     switch (payload['type']) {
       case 'connected':
         serverVersion = payload['version']?.toString() ?? '';
+        if (payload['day_id'] is String) {
+          _activeDayId = payload['day_id'] as String;
+        }
         break;
 
       case 'client.ready':
@@ -319,36 +379,71 @@ class EpisController extends ChangeNotifier {
         break;
 
       case 'chat.accepted':
+        final requestId = payload['request_id'];
+        final canonical = _parseConversationMessage(payload['message']);
+        if (requestId is String && canonical != null) {
+          if (canonical.dayId != null &&
+              _activeDayId != null &&
+              canonical.dayId != _activeDayId) {
+            _activeDayId = canonical.dayId;
+            messages
+              ..clear()
+              ..add(canonical);
+          } else {
+            _activeDayId ??= canonical.dayId;
+            final index = messages.indexWhere(
+              (item) => item.role == ChatRole.user && item.requestId == requestId,
+            );
+            if (index >= 0) {
+              messages[index] = messages[index].copyWith(
+                messageId: canonical.messageId,
+                requestId: canonical.requestId,
+                seq: canonical.seq,
+                createdAt: canonical.createdAt,
+                attachments: canonical.attachments,
+                dayId: canonical.dayId,
+              );
+            }
+          }
+          _pendingUserMessages[requestId] = canonical;
+        }
+        break;
+
       case 'conversation.accepted':
         break;
 
       case 'conversation.snapshot':
+        final snapshotDay = payload['day_id'] is String
+            ? payload['day_id'] as String
+            : _activeDayId;
+        _activeDayId = snapshotDay;
         final snapshot = _parseConversationSnapshot(payload['messages']);
+        final merged = <ChatMessage>[...snapshot];
+        for (final pending in _pendingUserMessages.values) {
+          final exists = merged.any(
+            (item) => _sameCanonicalMessage(item, pending),
+          );
+          if (!exists) merged.add(pending);
+        }
         messages
           ..clear()
-          ..addAll(snapshot)
-          ..addAll(_pendingUserMessages.values);
+          ..addAll(merged);
         break;
 
       case 'conversation.live_message':
-        final role = payload['role'];
-        final text = payload['text']?.toString().trim() ?? '';
-        if ((role == 'user' || role == 'assistant') && text.isNotEmpty) {
-          final attachments = <ChatAttachmentSummary>[];
-          final rawAttachments = payload['attachments'];
-          if (rawAttachments is List) {
-            for (final item in rawAttachments) {
-              final parsed = ChatAttachmentSummary.tryParse(item);
-              if (parsed != null) attachments.add(parsed);
-            }
+        final incoming = _parseConversationMessage(payload);
+        if (incoming != null) {
+          if (incoming.dayId != null &&
+              _activeDayId != null &&
+              incoming.dayId != _activeDayId) {
+            _activeDayId = incoming.dayId;
+            messages
+              ..clear()
+              ..add(incoming);
+          } else {
+            _activeDayId ??= incoming.dayId;
+            _mergeCanonicalMessage(incoming);
           }
-          messages.add(
-            ChatMessage(
-              role: role == 'user' ? ChatRole.user : ChatRole.assistant,
-              text: text,
-              attachments: attachments,
-            ),
-          );
         }
         break;
 
@@ -362,11 +457,25 @@ class EpisController extends ChangeNotifier {
           }
         }
         if (text.isNotEmpty || results.isNotEmpty) {
-          messages.add(
+          final seqValue = payload['seq'];
+          _mergeCanonicalMessage(
             ChatMessage(
               role: ChatRole.assistant,
               text: text,
               toolResults: results,
+              messageId: payload['message_id'] is String
+                  ? payload['message_id'] as String
+                  : null,
+              requestId: payload['request_id'] is String
+                  ? payload['request_id'] as String
+                  : null,
+              seq: seqValue is num ? seqValue.toInt() : null,
+              createdAt: payload['created_at'] is String
+                  ? payload['created_at'] as String
+                  : null,
+              dayId: payload['day_id'] is String
+                  ? payload['day_id'] as String
+                  : null,
             ),
           );
         }
@@ -384,7 +493,26 @@ class EpisController extends ChangeNotifier {
       case 'proactive.message':
         final text = payload['text']?.toString().trim() ?? '';
         if (text.isNotEmpty) {
-          messages.add(ChatMessage(role: ChatRole.assistant, text: text));
+          final seqValue = payload['seq'];
+          _mergeCanonicalMessage(
+            ChatMessage(
+              role: ChatRole.assistant,
+              text: text,
+              messageId: payload['message_id'] is String
+                  ? payload['message_id'] as String
+                  : null,
+              requestId: payload['request_id'] is String
+                  ? payload['request_id'] as String
+                  : null,
+              seq: seqValue is num ? seqValue.toInt() : null,
+              createdAt: payload['created_at'] is String
+                  ? payload['created_at'] as String
+                  : null,
+              dayId: payload['day_id'] is String
+                  ? payload['day_id'] as String
+                  : null,
+            ),
+          );
         }
         break;
 
@@ -418,12 +546,15 @@ class EpisController extends ChangeNotifier {
         break;
 
       case 'conversation.reset':
-        messages.clear();
+        _finishRequest(payload['request_id']);
+        if (payload['preserved_daily_transcript'] != true) {
+          messages.clear();
+          pendingAttachments.clear();
+          _inFlightRequests.clear();
+          _pendingUserMessages.clear();
+        }
         approvals.clear();
-        pendingAttachments.clear();
         _approvalSubmitting.clear();
-        _inFlightRequests.clear();
-        _pendingUserMessages.clear();
         error = null;
         break;
 

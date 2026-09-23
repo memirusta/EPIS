@@ -2,6 +2,7 @@ import asyncio
 import base64
 from pathlib import Path
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 
@@ -12,6 +13,7 @@ sys.path.insert(0, str(ROOT / "Layer-2" / "src"))
 
 from agentic.tools import build_local_registry
 import server.app as server_app
+from server.daily_transcript import SqliteDailyTranscriptStore
 
 
 class PhoneSyncAttachmentTests(unittest.TestCase):
@@ -80,64 +82,49 @@ class PhoneSyncAttachmentTests(unittest.TestCase):
             display_text,
         )
 
-    def test_conversation_snapshot_strips_internal_attachment_context(self):
-        previous = server_app._core
-        server_app._core = SimpleNamespace(
-            hot_memory=SimpleNamespace(
-                load_recent=lambda: [
-                    {
-                        "role": "user",
-                        "content": (
-                            "Dosyaya bak\n📎 test.txt"
-                            + server_app._ATTACHMENT_MARKER
-                            + "\nsecret internal context"
-                            + server_app._ATTACHMENT_END
-                        ),
-                    },
-                    {"role": "assistant", "content": "Baktım."},
-                ]
-            ),
-            history=[],
+    def test_attachment_internal_context_is_stripped_from_display_text(self):
+        model_text = (
+            "Dosyaya bak\n📎 test.txt"
+            + server_app._ATTACHMENT_MARKER
+            + "\nsecret internal context"
+            + server_app._ATTACHMENT_END
         )
-        try:
-            snapshot = server_app.conversation_payload()
-        finally:
-            server_app._core = previous
-        self.assertEqual(snapshot[0]["text"], "Dosyaya bak\n📎 test.txt")
-        self.assertEqual(snapshot[1]["text"], "Baktım.")
+        self.assertEqual(
+            server_app._display_history_text(model_text),
+            "Dosyaya bak\n📎 test.txt",
+        )
 
-    def test_conversation_sync_websocket_returns_active_hot_session(self):
-        previous = server_app._core
-        server_app._core = SimpleNamespace(
-            hot_memory=SimpleNamespace(
-                load_recent=lambda: [
-                    {"role": "user", "content": "PC mesajı"},
-                    {"role": "assistant", "content": "PC cevabı"},
-                ]
-            ),
-            history=[],
-        )
-        try:
-            with TestClient(server_app.app) as client:
-                with client.websocket_connect("/ws") as websocket:
-                    self.assertEqual(websocket.receive_json()["type"], "connected")
-                    websocket.send_json({
-                        "type": "client.hello",
-                        "version": 2,
-                        "client_id": "mobile-test",
-                        "client_type": "mobile",
-                    })
-                    self.assertEqual(websocket.receive_json()["type"], "client.ready")
-                    websocket.send_json({
-                        "type": "conversation.sync",
-                        "request_id": "sync-test",
-                    })
-                    payload = websocket.receive_json()
-            self.assertEqual(payload["type"], "conversation.snapshot")
-            self.assertEqual(payload["messages"][0]["text"], "PC mesajı")
-            self.assertEqual(payload["messages"][1]["text"], "PC cevabı")
-        finally:
-            server_app._core = previous
+    def test_conversation_sync_websocket_returns_canonical_daily_transcript(self):
+        previous_store = server_app._transcript_store
+        with tempfile.TemporaryDirectory() as temp:
+            store = SqliteDailyTranscriptStore(
+                Path(temp) / "daily.sqlite3",
+                durable=True,
+            )
+            store.append_message(role="user", text="PC mesajı")
+            store.append_message(role="assistant", text="PC cevabı")
+            server_app._transcript_store = store
+            try:
+                with TestClient(server_app.app) as client:
+                    with client.websocket_connect("/ws") as websocket:
+                        self.assertEqual(websocket.receive_json()["type"], "connected")
+                        websocket.send_json({
+                            "type": "client.hello",
+                            "version": 2,
+                            "client_id": "mobile-test",
+                            "client_type": "mobile",
+                        })
+                        self.assertEqual(websocket.receive_json()["type"], "client.ready")
+                        websocket.send_json({
+                            "type": "conversation.sync",
+                            "request_id": "sync-test",
+                        })
+                        payload = websocket.receive_json()
+                self.assertEqual(payload["type"], "conversation.snapshot")
+                self.assertEqual(payload["messages"][0]["text"], "PC mesajı")
+                self.assertEqual(payload["messages"][1]["text"], "PC cevabı")
+            finally:
+                server_app._transcript_store = previous_store
 
     def test_mobile_source_registers_device_agent_sync_and_attachment_button(self):
         mobile = ROOT / "Layer-2" / "mobile"

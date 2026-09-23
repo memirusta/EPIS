@@ -16,3 +16,4 @@ pycaw; sys_platform == 'win32'
 winrt-Windows.Media.Control==3.2.1; sys_platform == 'win32'
 winrt-Windows.Foundation==3.2.1; sys_platform == 'win32'
 winrt-Windows.Foundation.Collections==3.2.1; sys_platform == 'win32'
+psycopg[binary]>=3.2,<4

@@ -11,6 +11,11 @@ type Message = {
   role: "user" | "assistant";
   text: string;
   toolResults?: ToolResult[];
+  messageId?: string;
+  requestId?: string;
+  seq?: number;
+  createdAt?: string;
+  dayId?: string;
 };
 
 type ConnectionState = "connecting" | "online" | "offline";
@@ -123,8 +128,8 @@ type UsageSnapshot = {
   warning: string | null;
 };
 
-const CHAT_STORAGE_KEY = "epis.desktop.chat.v2";
-const LEGACY_CHAT_STORAGE_KEY = "epis.desktop.chat.v1";
+const CHAT_STORAGE_KEY = "epis.desktop.chat.v3";
+const LEGACY_CHAT_STORAGE_KEYS = ["epis.desktop.chat.v2", "epis.desktop.chat.v1"];
 const MAX_PERSISTED_MESSAGES = 80;
 const MAX_PERSISTED_TEXT_CHARS = 12000;
 
@@ -189,50 +194,85 @@ function asObject(value: unknown): ToolResult | null {
   return null;
 }
 
+function localDayId(): string {
+  const date = new Date();
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function asCanonicalMessage(value: unknown): Message | null {
+  const item = asObject(value);
+  if (item === null) return null;
+  if (item.role !== "user" && item.role !== "assistant") return null;
+  if (typeof item.text !== "string" || !item.text.trim()) return null;
+
+  return {
+    id: nextMessageId(),
+    role: item.role,
+    text: item.text.slice(0, MAX_PERSISTED_TEXT_CHARS),
+    messageId: typeof item.message_id === "string" ? item.message_id : undefined,
+    requestId: typeof item.request_id === "string" ? item.request_id : undefined,
+    seq: typeof item.seq === "number" ? item.seq : undefined,
+    createdAt:
+      typeof item.created_at === "string" ? item.created_at : undefined,
+    dayId: typeof item.day_id === "string" ? item.day_id : undefined,
+  };
+}
+
 function loadStoredMessages(): Message[] {
   try {
-    const raw =
-      window.localStorage.getItem(CHAT_STORAGE_KEY) ??
-      window.localStorage.getItem(LEGACY_CHAT_STORAGE_KEY);
-
-    if (!raw) {
-      return [];
+    const currentDay = localDayId();
+    const currentRaw = window.localStorage.getItem(CHAT_STORAGE_KEY);
+    if (currentRaw) {
+      const envelope: unknown = JSON.parse(currentRaw);
+      const object = asObject(envelope);
+      if (
+        object !== null &&
+        object.day_id === currentDay &&
+        Array.isArray(object.messages)
+      ) {
+        return object.messages
+          .map(asCanonicalMessage)
+          .filter((item): item is Message => item !== null)
+          .slice(-MAX_PERSISTED_MESSAGES);
+      }
     }
 
-    const parsed: unknown = JSON.parse(raw);
-
-    if (!Array.isArray(parsed)) {
-      return [];
+    // One-time compatibility import for the pre-canonical desktop cache.
+    for (const key of LEGACY_CHAT_STORAGE_KEYS) {
+      const raw = window.localStorage.getItem(key);
+      if (!raw) continue;
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) continue;
+      return parsed
+        .map(asCanonicalMessage)
+        .filter((item): item is Message => item !== null)
+        .slice(-MAX_PERSISTED_MESSAGES);
     }
-
-    const restored: Message[] = [];
-
-    for (const value of parsed) {
-      const item = asObject(value);
-
-      if (item === null) {
-        continue;
-      }
-
-      if (item.role !== "user" && item.role !== "assistant") {
-        continue;
-      }
-
-      if (typeof item.text !== "string") {
-        continue;
-      }
-
-      restored.push({
-        id: nextMessageId(),
-        role: item.role,
-        text: item.text.slice(0, MAX_PERSISTED_TEXT_CHARS),
-      });
-    }
-
-    return restored.slice(-MAX_PERSISTED_MESSAGES);
+    return [];
   } catch {
     return [];
   }
+}
+
+function sameCanonicalMessage(left: Message, right: Message): boolean {
+  if (left.messageId && right.messageId) {
+    return left.messageId === right.messageId;
+  }
+  if (left.requestId && right.requestId && left.role === right.role) {
+    return left.requestId === right.requestId;
+  }
+  return false;
+}
+
+function mergeCanonicalMessage(current: Message[], incoming: Message): Message[] {
+  const index = current.findIndex((item) => sameCanonicalMessage(item, incoming));
+  if (index < 0) return [...current, incoming];
+  const next = [...current];
+  next[index] = { ...current[index], ...incoming, id: current[index].id };
+  return next;
 }
 
 function toolTitle(tool: ToolResult): string {
@@ -390,6 +430,9 @@ export default function App() {
   const reconnectDelayRef = useRef(1000);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const clientIdRef = useRef<string>(nextProtocolId("desktop"));
+  const messagesRef = useRef<Message[]>([]);
+  const importAttemptedRef = useRef(false);
+  const activeDayRef = useRef<string>(localDayId());
 
   const [page, setPage] = useState<Page>("chat");
   const [connection, setConnection] =
@@ -422,18 +465,26 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    messagesRef.current = messages;
     try {
       const persisted = messages
         .slice(-MAX_PERSISTED_MESSAGES)
-        .map(({ role, text }) => ({
+        .map(({ role, text, messageId, requestId, seq, createdAt, dayId }) => ({
           role,
           text: text.slice(0, MAX_PERSISTED_TEXT_CHARS),
+          message_id: messageId,
+          request_id: requestId,
+          seq,
+          created_at: createdAt,
+          day_id: dayId,
         }));
       window.localStorage.setItem(
         CHAT_STORAGE_KEY,
-        JSON.stringify(persisted),
+        JSON.stringify({ day_id: activeDayRef.current, messages: persisted }),
       );
-      window.localStorage.removeItem(LEGACY_CHAT_STORAGE_KEY);
+      for (const key of LEGACY_CHAT_STORAGE_KEYS) {
+        window.localStorage.removeItem(key);
+      }
     } catch {
       // UI persistence failure must not break chat.
     }
@@ -542,6 +593,9 @@ export default function App() {
 
           if (data.type === "connected") {
             setServerVersion(data.version ?? "");
+            if (typeof data.day_id === "string") {
+              activeDayRef.current = data.day_id;
+            }
             return;
           }
 
@@ -550,10 +604,75 @@ export default function App() {
             setConnection("online");
             setError(null);
             ws.send(JSON.stringify({ type: "devices.get" }));
+            ws.send(JSON.stringify({
+              type: "conversation.sync",
+              request_id: nextProtocolId("sync"),
+            }));
             return;
           }
 
           if (data.type === "chat.accepted") {
+            const canonical = asCanonicalMessage(data.message);
+            if (canonical !== null) {
+              if (canonical.dayId && canonical.dayId !== activeDayRef.current) {
+                activeDayRef.current = canonical.dayId;
+                setMessages([canonical]);
+              } else {
+                setMessages((current) =>
+                  current.map((item) =>
+                    item.requestId === canonical.requestId && item.role === "user"
+                      ? { ...item, ...canonical, id: item.id }
+                      : item,
+                  ),
+                );
+              }
+            }
+            return;
+          }
+
+          if (data.type === "conversation.snapshot") {
+            const raw = Array.isArray(data.messages) ? data.messages : [];
+            const snapshot = raw
+              .map(asCanonicalMessage)
+              .filter((item: Message | null): item is Message => item !== null);
+            const snapshotDay =
+              typeof data.day_id === "string" ? data.day_id : activeDayRef.current;
+            const previousDay = activeDayRef.current;
+            activeDayRef.current = snapshotDay;
+
+            if (
+              snapshot.length === 0 &&
+              previousDay === snapshotDay &&
+              messagesRef.current.length > 0 &&
+              !importAttemptedRef.current
+            ) {
+              importAttemptedRef.current = true;
+              ws.send(JSON.stringify({
+                type: "conversation.import",
+                request_id: nextProtocolId("import"),
+                messages: messagesRef.current.map(({ role, text }) => ({ role, text })),
+              }));
+              return;
+            }
+
+            setMessages(snapshot);
+            return;
+          }
+
+          if (data.type === "conversation.imported") {
+            return;
+          }
+
+          if (data.type === "conversation.live_message") {
+            const incoming = asCanonicalMessage(data);
+            if (incoming !== null) {
+              if (incoming.dayId && incoming.dayId !== activeDayRef.current) {
+                activeDayRef.current = incoming.dayId;
+                setMessages([incoming]);
+              } else {
+                setMessages((current) => mergeCanonicalMessage(current, incoming));
+              }
+            }
             return;
           }
 
@@ -568,15 +687,24 @@ export default function App() {
             const messageText = String(data.text ?? "").trim();
 
             if (messageText || parsedResults.length > 0) {
-              setMessages((current) => [
-                ...current,
-                {
-                  id: nextMessageId(),
-                  role: "assistant",
-                  text: messageText,
-                  toolResults: parsedResults,
-                },
-              ]);
+              const incoming: Message = {
+                id: nextMessageId(),
+                role: "assistant",
+                text: messageText,
+                toolResults: parsedResults,
+                messageId: typeof data.message_id === "string" ? data.message_id : undefined,
+                requestId: typeof data.request_id === "string" ? data.request_id : undefined,
+                seq: typeof data.seq === "number" ? data.seq : undefined,
+                createdAt:
+                  typeof data.created_at === "string" ? data.created_at : undefined,
+                dayId: typeof data.day_id === "string" ? data.day_id : undefined,
+              };
+              if (incoming.dayId && incoming.dayId !== activeDayRef.current) {
+                activeDayRef.current = incoming.dayId;
+                setMessages([incoming]);
+              } else {
+                setMessages((current) => mergeCanonicalMessage(current, incoming));
+              }
             }
 
             if (Boolean(data.confirmation_required)) {
@@ -589,6 +717,30 @@ export default function App() {
             }
 
             finishInFlight(data.request_id);
+            return;
+          }
+
+          if (data.type === "proactive.message") {
+            const textValue = String(data.text ?? "").trim();
+            if (textValue) {
+              const incoming: Message = {
+                id: nextMessageId(),
+                role: "assistant",
+                text: textValue,
+                messageId: typeof data.message_id === "string" ? data.message_id : undefined,
+                requestId: typeof data.request_id === "string" ? data.request_id : undefined,
+                seq: typeof data.seq === "number" ? data.seq : undefined,
+                createdAt:
+                  typeof data.created_at === "string" ? data.created_at : undefined,
+                dayId: typeof data.day_id === "string" ? data.day_id : undefined,
+              };
+              if (incoming.dayId && incoming.dayId !== activeDayRef.current) {
+                activeDayRef.current = incoming.dayId;
+                setMessages([incoming]);
+              } else {
+                setMessages((current) => mergeCanonicalMessage(current, incoming));
+              }
+            }
             return;
           }
 
@@ -635,8 +787,11 @@ export default function App() {
           }
 
           if (data.type === "conversation.reset") {
-            setMessages([]);
-            setInFlightRequests(new Set());
+            finishInFlight(data.request_id);
+            if (!Boolean(data.preserved_daily_transcript)) {
+              setMessages([]);
+              setInFlightRequests(new Set());
+            }
             setApprovals([]);
             setApprovalSubmitting(new Set());
             setError(null);
@@ -807,6 +962,7 @@ export default function App() {
         id: nextMessageId(),
         role: "user",
         text: value,
+        requestId,
       },
     ]);
 
@@ -1441,3 +1597,4 @@ export default function App() {
     </div>
   );
 }
+

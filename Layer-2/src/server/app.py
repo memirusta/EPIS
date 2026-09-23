@@ -18,9 +18,10 @@ from fastapi.responses import JSONResponse
 from agentic.cli import create_core
 from agentic.cloud_transport import CloudDeviceTransport
 from agentic.devices import Device
+from server.daily_transcript import build_daily_transcript_store, day_id_for
 
 
-SERVER_VERSION = "0.7.0"
+SERVER_VERSION = "0.8.0"
 DEPLOYMENT_MODE = os.getenv("EPIS_DEPLOYMENT", "local").strip().lower()
 SERVER_TOKEN = os.getenv("EPIS_SERVER_TOKEN", "").strip()
 WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "").strip()
@@ -39,6 +40,8 @@ app = FastAPI(
 # Tek process = tek EPIS beyni. Desktop/mobile ayni shared session'i kullanir,
 # ancak model/tool turn'leri birbirini gereksiz yere bloklamaz.
 _core = None
+_transcript_store = None
+_core_day_id = day_id_for()
 _MAX_CONCURRENT_TURNS = max(
     1,
     min(
@@ -335,34 +338,64 @@ def _display_history_text(content: str) -> str:
     return value.strip()
 
 
-def conversation_payload() -> list[dict[str, Any]]:
-    """Return the active shared text conversation for UI synchronization."""
-    core = get_core()
-    history = []
-    hot_memory = getattr(core, "hot_memory", None)
-    if hot_memory is not None:
-        try:
-            history = hot_memory.load_recent()
-        except Exception:
-            history = []
-    if not history:
-        history = list(getattr(core, "history", []) or [])
+def get_transcript_store():
+    global _transcript_store
+    if _transcript_store is None:
+        _transcript_store = build_daily_transcript_store(
+            deployment_mode=DEPLOYMENT_MODE
+        )
+    return _transcript_store
 
-    messages: list[dict[str, Any]] = []
-    for item in history:
-        if not isinstance(item, dict):
-            continue
-        role = item.get("role")
-        if role not in {"user", "assistant"}:
-            continue
-        text = _display_history_text(item.get("content") or "")
-        if not text:
-            continue
-        messages.append({
-            "role": role,
-            "text": text,
-        })
-    return messages
+
+def transcript_store_status() -> dict[str, Any]:
+    store = get_transcript_store()
+    status = getattr(store, "status", None)
+    if status is None:
+        return {"backend": "unknown", "durable": False}
+    return status.as_dict()
+
+
+def conversation_payload() -> list[dict[str, Any]]:
+    """Return today's canonical transcript for UI synchronization."""
+    return get_transcript_store().list_messages()
+
+
+async def _prepare_daily_core_context() -> None:
+    """Keep Luna's short-lived context aligned with today's canonical transcript."""
+    global _core_day_id
+    current_day = day_id_for()
+    core = get_core()
+
+    if current_day != _core_day_id:
+        if await _has_processing_operations():
+            raise RuntimeError("day_rollover_busy")
+        await run_core_call(core.new_conversation)
+        _core_day_id = current_day
+
+    context_messages = await asyncio.to_thread(
+        get_transcript_store().list_context_messages,
+        current_day,
+    )
+    normalized = [
+        {
+            "role": item.get("role"),
+            "content": item.get("text"),
+        }
+        for item in context_messages
+        if item.get("role") in {"user", "assistant"}
+        and str(item.get("text") or "").strip()
+    ]
+    hydrate = getattr(core, "hydrate_conversation_if_empty", None)
+    if hydrate is not None and normalized:
+        await run_core_call(hydrate, normalized)
+
+
+def _conversation_live_payload(message: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "conversation.live_message",
+        **message,
+        "time": utc_now(),
+    }
 
 
 async def _broadcast_conversation_snapshot(
@@ -370,13 +403,15 @@ async def _broadcast_conversation_snapshot(
     exclude_client_id: str | None = None,
 ) -> None:
     try:
-        messages = await run_core_call(conversation_payload)
+        messages = await asyncio.to_thread(conversation_payload)
     except Exception:
         return
     await _broadcast_clients(
         {
             "type": "conversation.snapshot",
             "messages": messages,
+            "store": transcript_store_status(),
+            "day_id": day_id_for(),
             "time": utc_now(),
         },
         exclude_client_id=exclude_client_id,
@@ -562,8 +597,9 @@ def turn_payload(
     *,
     request_id: str | None = None,
     client_id: str | None = None,
+    conversation_message: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "type": "assistant.message",
         "request_id": request_id,
         "client_id": client_id,
@@ -579,6 +615,14 @@ def turn_payload(
         ),
         "time": utc_now(),
     }
+    if conversation_message:
+        payload.update({
+            "message_id": conversation_message.get("message_id"),
+            "seq": conversation_message.get("seq"),
+            "day_id": conversation_message.get("day_id"),
+            "created_at": conversation_message.get("created_at"),
+        })
+    return payload
 
 
 async def run_core_call(
@@ -748,6 +792,21 @@ async def proactive_event(request: Request):
         ) from exc
 
     text = str(getattr(turn, "message", "") or "").strip()
+    conversation_message = None
+    if text:
+        try:
+            conversation_message = await asyncio.to_thread(
+                get_transcript_store().append_message,
+                role="assistant",
+                text=text,
+                request_id=request_id,
+                client_id="kairos",
+                origin_device_id="trusted-local-event",
+                source="proactive",
+            )
+        except Exception:
+            conversation_message = None
+
     async with _client_lock:
         connected_clients = len(_client_connections)
     await _broadcast_clients(
@@ -757,10 +816,13 @@ async def proactive_event(request: Request):
             "trigger_type": trigger_type,
             "priority": priority,
             "text": text,
+            "message_id": (conversation_message or {}).get("message_id"),
+            "seq": (conversation_message or {}).get("seq"),
+            "day_id": (conversation_message or {}).get("day_id"),
+            "created_at": (conversation_message or {}).get("created_at"),
             "time": utc_now(),
         }
     )
-    await _broadcast_conversation_snapshot()
     return JSONResponse(
         {
             "ok": True,
@@ -799,17 +861,40 @@ async def _process_chat(
             },
         )
     else:
+        assistant_text = str(getattr(turn, "message", "") or "").strip()
+        conversation_message = None
+        if assistant_text:
+            try:
+                conversation_message = await asyncio.to_thread(
+                    get_transcript_store().append_message,
+                    role="assistant",
+                    text=assistant_text,
+                    request_id=request_id,
+                    client_id=client_id,
+                    origin_device_id=origin_device_id,
+                    source="chat",
+                )
+            except Exception:
+                conversation_message = None
+
         await _send_to_client(
             client_id,
             turn_payload(
                 turn,
                 request_id=request_id,
                 client_id=client_id,
+                conversation_message=conversation_message,
             ),
         )
-        await _broadcast_conversation_snapshot(
-            exclude_client_id=client_id,
-        )
+        if conversation_message is not None:
+            await _broadcast_clients(
+                _conversation_live_payload(conversation_message),
+                exclude_client_id=client_id,
+            )
+        else:
+            await _broadcast_conversation_snapshot(
+                exclude_client_id=client_id,
+            )
     finally:
         await _end_operation(request_id)
 
@@ -851,17 +936,39 @@ async def _process_approval(
             },
         )
     else:
+        assistant_text = str(getattr(turn, "message", "") or "").strip()
+        conversation_message = None
+        if assistant_text:
+            try:
+                conversation_message = await asyncio.to_thread(
+                    get_transcript_store().append_message,
+                    role="assistant",
+                    text=assistant_text,
+                    request_id=request_id,
+                    client_id=client_id,
+                    source="approval",
+                )
+            except Exception:
+                conversation_message = None
+
         await _send_to_client(
             client_id,
             turn_payload(
                 turn,
                 request_id=request_id,
                 client_id=client_id,
+                conversation_message=conversation_message,
             ),
         )
-        await _broadcast_conversation_snapshot(
-            exclude_client_id=client_id,
-        )
+        if conversation_message is not None:
+            await _broadcast_clients(
+                _conversation_live_payload(conversation_message),
+                exclude_client_id=client_id,
+            )
+        else:
+            await _broadcast_conversation_snapshot(
+                exclude_client_id=client_id,
+            )
     finally:
         await _release_approval(approval_id)
         await _end_operation(operation_id)
@@ -918,11 +1025,31 @@ async def _process_conversation_reset(
         )
         return
 
+    try:
+        await asyncio.to_thread(
+            get_transcript_store().mark_context_boundary,
+            day_id_for(),
+        )
+    except Exception as exc:
+        await _send_to_client(
+            client_id,
+            {
+                "type": "error",
+                "request_id": request_id,
+                "error": "context_boundary_write_failed",
+                "detail": public_error_detail(exc),
+                "time": utc_now(),
+            },
+        )
+        return
+
     await _broadcast_clients(
         {
             "type": "conversation.reset",
             "request_id": request_id,
             "cleared_messages": int(cleared),
+            "cleared_context_messages": int(cleared),
+            "preserved_daily_transcript": True,
             "ok": True,
             "time": utc_now(),
         }
@@ -951,6 +1078,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             "version": SERVER_VERSION,
             "protocol_version": 2,
             "deployment": DEPLOYMENT_MODE,
+            "transcript_store": transcript_store_status(),
+            "day_id": day_id_for(),
             "time": utc_now(),
         }
     )
@@ -1167,6 +1296,45 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     f"{client_type}:{client_id}"
                 )
 
+                try:
+                    await _prepare_daily_core_context()
+                except Exception as exc:
+                    await _send_to_client(
+                        client_id,
+                        {
+                            "type": "error",
+                            "request_id": request_id,
+                            "error": "daily_context_unavailable",
+                            "detail": public_error_detail(exc),
+                            "time": utc_now(),
+                        },
+                    )
+                    continue
+
+                try:
+                    user_message = await asyncio.to_thread(
+                        get_transcript_store().append_message,
+                        role="user",
+                        text=display_text,
+                        request_id=request_id,
+                        client_id=client_id,
+                        origin_device_id=origin_device_id,
+                        attachments=attachment_summaries,
+                        source="chat",
+                    )
+                except Exception as exc:
+                    await _send_to_client(
+                        client_id,
+                        {
+                            "type": "error",
+                            "request_id": request_id,
+                            "error": "transcript_write_failed",
+                            "detail": public_error_detail(exc),
+                            "time": utc_now(),
+                        },
+                    )
+                    continue
+
                 await _begin_operation(request_id)
                 await _send_to_client(
                     client_id,
@@ -1174,18 +1342,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         "type": "chat.accepted",
                         "request_id": request_id,
                         "client_id": client_id,
+                        "message": user_message,
                         "time": utc_now(),
                     },
                 )
                 await _broadcast_clients(
-                    {
-                        "type": "conversation.live_message",
-                        "request_id": request_id,
-                        "role": "user",
-                        "text": display_text,
-                        "attachments": attachment_summaries,
-                        "time": utc_now(),
-                    },
+                    _conversation_live_payload(user_message),
                     exclude_client_id=client_id,
                 )
                 _spawn_background(
@@ -1252,7 +1414,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             if message_type == "conversation.sync":
                 request_id = _valid_id(message.get("request_id"))
                 try:
-                    messages = await run_core_call(conversation_payload)
+                    messages = await asyncio.to_thread(conversation_payload)
                 except Exception as exc:
                     await _send_to_client(
                         client_id,
@@ -1271,8 +1433,74 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         "type": "conversation.snapshot",
                         "request_id": request_id,
                         "messages": messages,
+                        "store": transcript_store_status(),
+                        "day_id": day_id_for(),
                         "time": utc_now(),
                     },
+                )
+                continue
+
+            if message_type == "conversation.import":
+                request_id = _valid_id(message.get("request_id"))
+                if client_type != "desktop":
+                    await _send_to_client(
+                        client_id,
+                        {
+                            "type": "error",
+                            "request_id": request_id,
+                            "error": "conversation_import_not_allowed",
+                            "time": utc_now(),
+                        },
+                    )
+                    continue
+                raw_messages = message.get("messages")
+                if not isinstance(raw_messages, list) or len(raw_messages) > 100:
+                    await _send_to_client(
+                        client_id,
+                        {
+                            "type": "error",
+                            "request_id": request_id,
+                            "error": "invalid_conversation_import",
+                            "time": utc_now(),
+                        },
+                    )
+                    continue
+                try:
+                    imported = await asyncio.to_thread(
+                        get_transcript_store().import_if_empty,
+                        raw_messages,
+                    )
+                    messages = await asyncio.to_thread(conversation_payload)
+                except Exception as exc:
+                    await _send_to_client(
+                        client_id,
+                        {
+                            "type": "error",
+                            "request_id": request_id,
+                            "error": "conversation_import_failed",
+                            "detail": public_error_detail(exc),
+                            "time": utc_now(),
+                        },
+                    )
+                    continue
+
+                await _send_to_client(
+                    client_id,
+                    {
+                        "type": "conversation.imported",
+                        "request_id": request_id,
+                        "imported": len(imported),
+                        "time": utc_now(),
+                    },
+                )
+                await _broadcast_clients(
+                    {
+                        "type": "conversation.snapshot",
+                        "messages": messages,
+                        "store": transcript_store_status(),
+                        "day_id": day_id_for(),
+                        "time": utc_now(),
+                    }
                 )
                 continue
 

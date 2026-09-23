@@ -2985,6 +2985,52 @@ class AgentCore:
 
         return result
 
+    def hydrate_conversation_if_empty(
+        self,
+        messages: list[dict],
+    ) -> int:
+        """Restore canonical same-day context after a process restart.
+
+        The server owns the durable daily transcript.  This bridge only seeds the
+        short-lived hot/model context when it is empty; it never overwrites a
+        running or already-restored conversation.
+        """
+        cleaned = self._clean_hot_messages(messages)
+        if not cleaned:
+            return 0
+
+        with self._state_lock:
+            self._refresh_hot_history()
+            if self.history:
+                return 0
+            if any(
+                item.get("status") == "running"
+                for item in self._active_turns.values()
+            ):
+                return 0
+
+            if self.hot_memory is not None:
+                try:
+                    for item in cleaned:
+                        if item["role"] == "user":
+                            self.hot_memory.append_turn(item["content"], "")
+                        else:
+                            self.hot_memory.append_turn("", item["content"])
+                    self.history = self._clean_hot_messages(
+                        self.hot_memory.load_recent()
+                    )
+                except Exception as exc:
+                    self._log(
+                        "hot_memory_hydration_failed",
+                        error=type(exc).__name__,
+                    )
+                    self.history = list(cleaned)
+            else:
+                self.history = list(cleaned)
+
+            self.restored_hot_messages = len(self.history)
+            return self.restored_hot_messages
+
     def new_conversation(
         self,
     ) -> int:
