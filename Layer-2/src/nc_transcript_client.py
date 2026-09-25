@@ -155,7 +155,7 @@ class CloudTranscriptClient:
             "POST",
             "/internal/nc/trace",
             body=body,
-            timeout=min(self.timeout, 5.0),
+            timeout=min(self.timeout, 3.0),
         )
         if not result.get("ok"):
             raise RuntimeError("shared_nc_trace_failed")

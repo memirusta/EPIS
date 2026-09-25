@@ -140,6 +140,7 @@ class NightlyRecalculation:
         self._safe_memory_evidence = ""
         self._trace_seq = 0
         self._trace_warning_logged = False
+        self._trace_disabled = False
 
         self.report = {
             "date":              self.today.isoformat(),
@@ -172,6 +173,9 @@ class NightlyRecalculation:
         metrics: dict | None = None,
     ) -> bool:
         """Best-effort observable NC trace; never controls NC correctness."""
+        if self._trace_disabled:
+            return False
+
         self._trace_seq += 1
 
         try:
@@ -189,6 +193,9 @@ class NightlyRecalculation:
             return True
 
         except Exception as exc:
+            # Live Activity is best-effort telemetry. One cloud failure disables
+            # further trace I/O for this NC run so timeouts cannot accumulate.
+            self._trace_disabled = True
             if not self._trace_warning_logged:
                 logger.warning(
                     f"NC live trace kullanilamiyor: {exc}"

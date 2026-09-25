@@ -603,6 +603,142 @@ button {
   cursor: pointer;
 }
 
+.attachment-input {
+  display: none;
+}
+
+.attachment-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+
+  margin-bottom: 7px;
+}
+
+.attachment-chip {
+  max-width: 260px;
+  min-height: 38px;
+
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  padding: 7px 8px;
+
+  border: 1px solid
+    rgba(255, 255, 255, .07);
+
+  border-radius: 11px;
+
+  background:
+    rgba(24, 25, 30, .94);
+}
+
+.attachment-kind {
+  flex: 0 0 auto;
+
+  color: #8877ff;
+
+  font-size: 7px;
+  font-weight: 750;
+  letter-spacing: .06em;
+}
+
+.attachment-copy {
+  min-width: 0;
+
+  display: grid;
+  gap: 2px;
+}
+
+.attachment-copy strong {
+  overflow: hidden;
+
+  color: #d7d7dc;
+
+  font-size: 9px;
+  font-weight: 600;
+
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-copy small {
+  color: #686b76;
+
+  font-size: 8px;
+}
+
+.attachment-chip button {
+  width: 22px;
+  height: 22px;
+
+  margin-left: 2px;
+
+  border: 0;
+  border-radius: 7px;
+
+  background: transparent;
+  color: #70737e;
+
+  cursor: pointer;
+
+  font-size: 15px;
+}
+
+.attachment-chip button:hover {
+  background:
+    rgba(255, 255, 255, .05);
+
+  color: #d9d9de;
+}
+
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+
+  margin-top: 8px;
+}
+
+.message-attachments > span {
+  max-width: 250px;
+
+  display: flex;
+  align-items: center;
+  gap: 7px;
+
+  padding: 6px 8px;
+
+  border: 1px solid
+    rgba(255, 255, 255, .06);
+
+  border-radius: 8px;
+
+  background:
+    rgba(255, 255, 255, .025);
+}
+
+.message-attachments strong {
+  overflow: hidden;
+
+  color: #b9bac2;
+
+  font-size: 8px;
+  font-weight: 600;
+
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-attachments small {
+  flex: 0 0 auto;
+
+  color: #656873;
+
+  font-size: 7px;
+}
+
 .composer {
   min-height: 58px;
 
@@ -663,6 +799,8 @@ button {
 
 .attach {
   border: 1px solid rgba(255, 255, 255, .06);
+
+  cursor: pointer;
 
   background: rgba(255, 255, 255, .025);
   color: #696c76;

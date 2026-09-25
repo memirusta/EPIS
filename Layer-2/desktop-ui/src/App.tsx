@@ -1,10 +1,20 @@
-import { KeyboardEvent, useEffect, useRef, useState } from "react";
+import { ChangeEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
 type Page = "chat" | "usage" | "devices" | "memory" | "settings";
 
 type ToolResult = Record<string, unknown>;
+
+type AttachmentSummary = {
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+};
+
+type PendingAttachment = AttachmentSummary & {
+  dataBase64: string;
+};
 
 type Message = {
   id: number;
@@ -16,6 +26,7 @@ type Message = {
   seq?: number;
   createdAt?: string;
   dayId?: string;
+  attachments?: AttachmentSummary[];
 };
 
 type ConnectionState = "connecting" | "online" | "offline";
@@ -155,6 +166,18 @@ const CHAT_STORAGE_KEY = "epis.desktop.chat.v3";
 const LEGACY_CHAT_STORAGE_KEYS = ["epis.desktop.chat.v2", "epis.desktop.chat.v1"];
 const MAX_PERSISTED_MESSAGES = 80;
 const MAX_PERSISTED_TEXT_CHARS = 12000;
+const MAX_CHAT_ATTACHMENTS = 3;
+const MAX_ATTACHMENT_BYTES = 5_000_000;
+const MAX_TEXT_ATTACHMENT_BYTES = 512_000;
+
+const TEXT_ATTACHMENT_EXTENSIONS = new Set([
+  ".txt", ".md", ".py", ".js", ".ts", ".tsx", ".jsx", ".dart",
+  ".kt", ".kts", ".java", ".rs", ".go", ".c", ".h", ".cpp",
+  ".hpp", ".cs", ".json", ".yaml", ".yml", ".toml", ".xml",
+  ".html", ".css", ".scss", ".sql", ".sh", ".ps1", ".bat",
+  ".csv", ".log", ".ini", ".cfg",
+]);
+
 
 let messageId = 0;
 
@@ -217,6 +240,179 @@ function asObject(value: unknown): ToolResult | null {
   return null;
 }
 
+function attachmentExtension(name: string): string {
+  const index = name.lastIndexOf(".");
+  return index >= 0
+    ? name.slice(index).toLowerCase()
+    : "";
+}
+
+function attachmentMime(file: File): string {
+  const declared = file.type
+    .trim()
+    .toLowerCase();
+
+  if (declared) {
+    return declared;
+  }
+
+  const extension =
+    attachmentExtension(file.name);
+
+  if (extension === ".png") {
+    return "image/png";
+  }
+
+  if (
+    extension === ".jpg" ||
+    extension === ".jpeg"
+  ) {
+    return "image/jpeg";
+  }
+
+  if (extension === ".webp") {
+    return "image/webp";
+  }
+
+  if (extension === ".gif") {
+    return "image/gif";
+  }
+
+  return TEXT_ATTACHMENT_EXTENSIONS.has(
+    extension,
+  )
+    ? "text/plain"
+    : "application/octet-stream";
+}
+
+function isTextAttachment(
+  file: File,
+  mimeType: string,
+): boolean {
+  if (
+    mimeType.startsWith("text/")
+  ) {
+    return true;
+  }
+
+  if (
+    [
+      "application/json",
+      "application/xml",
+      "application/javascript",
+      "application/x-javascript",
+      "application/yaml",
+      "application/x-yaml",
+    ].includes(mimeType)
+  ) {
+    return true;
+  }
+
+  return TEXT_ATTACHMENT_EXTENSIONS.has(
+    attachmentExtension(file.name),
+  );
+}
+
+function fileToBase64(
+  file: File,
+): Promise<string> {
+  return new Promise(
+    (resolve, reject) => {
+      const reader =
+        new FileReader();
+
+      reader.onerror = () =>
+        reject(
+          new Error(
+            "file_read_failed",
+          ),
+        );
+
+      reader.onload = () => {
+        if (
+          typeof reader.result !==
+          "string"
+        ) {
+          reject(
+            new Error(
+              "file_read_failed",
+            ),
+          );
+          return;
+        }
+
+        const comma =
+          reader.result.indexOf(",");
+
+        if (comma < 0) {
+          reject(
+            new Error(
+              "file_read_failed",
+            ),
+          );
+          return;
+        }
+
+        resolve(
+          reader.result.slice(
+            comma + 1,
+          ),
+        );
+      };
+
+      reader.readAsDataURL(
+        file,
+      );
+    },
+  );
+}
+
+function attachmentSizeLabel(
+  bytes: number,
+): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  if (
+    bytes <
+    1024 * 1024
+  ) {
+    return `${Math.round(
+      bytes / 1024,
+    )} KB`;
+  }
+
+  return `${(
+    bytes /
+    (1024 * 1024)
+  ).toFixed(1)} MB`;
+}
+
+function asAttachmentSummary(
+  value: unknown,
+): AttachmentSummary | null {
+  const item = asObject(value);
+
+  if (item === null) {
+    return null;
+  }
+
+  if (
+    typeof item.name !== "string" ||
+    typeof item.mime_type !== "string" ||
+    typeof item.size_bytes !== "number"
+  ) {
+    return null;
+  }
+
+  return {
+    name: item.name,
+    mimeType: item.mime_type,
+    sizeBytes: item.size_bytes,
+  };
+}
+
 function localDayId(): string {
   const date = new Date();
   const year = date.getFullYear();
@@ -241,6 +437,16 @@ function asCanonicalMessage(value: unknown): Message | null {
     createdAt:
       typeof item.created_at === "string" ? item.created_at : undefined,
     dayId: typeof item.day_id === "string" ? item.day_id : undefined,
+    attachments: Array.isArray(item.attachments)
+      ? item.attachments
+          .map(asAttachmentSummary)
+          .filter(
+            (
+              attachment,
+            ): attachment is AttachmentSummary =>
+              attachment !== null,
+          )
+      : undefined,
   };
 }
 
@@ -657,6 +863,8 @@ export default function App() {
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectDelayRef = useRef(1000);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef =
+    useRef<HTMLInputElement | null>(null);
   const clientIdRef = useRef<string>(nextProtocolId("desktop"));
   const messagesRef = useRef<Message[]>([]);
   const importAttemptedRef = useRef(false);
@@ -673,6 +881,16 @@ export default function App() {
   const [messages, setMessages] =
     useState<Message[]>(loadStoredMessages);
   const [text, setText] = useState("");
+
+  const [
+    pendingAttachments,
+    setPendingAttachments,
+  ] = useState<PendingAttachment[]>([]);
+
+  const [
+    readingAttachments,
+    setReadingAttachments,
+  ] = useState(false);
   const [inFlightRequests, setInFlightRequests] =
     useState<Set<string>>(() => new Set());
   const [approvals, setApprovals] =
@@ -1191,38 +1409,264 @@ export default function App() {
     return true;
   }
 
-  function send() {
-    const value = text.trim();
+  async function handleAttachmentSelection(
+    event: ChangeEvent<HTMLInputElement>,
+  ) {
+    const selected =
+      event.target.files
+        ? Array.from(
+            event.target.files,
+          )
+        : [];
 
-    if (!value) {
+    event.target.value = "";
+
+    if (
+      selected.length === 0
+    ) {
       return;
     }
 
-    const requestId = nextProtocolId("chat");
+    const remaining =
+      MAX_CHAT_ATTACHMENTS -
+      pendingAttachments.length;
+
+    if (remaining <= 0) {
+      setError(
+        "Bir mesaja en fazla 3 dosya ekleyebilirsin.",
+      );
+      return;
+    }
+
+    setReadingAttachments(true);
+    setError(null);
+
+    try {
+      const accepted:
+        PendingAttachment[] = [];
+
+      const errors: string[] = [];
+
+      for (
+        const file of selected.slice(
+          0,
+          remaining,
+        )
+      ) {
+        const mimeType =
+          attachmentMime(file);
+
+        const textFile =
+          isTextAttachment(
+            file,
+            mimeType,
+          );
+
+        const imageFile =
+          mimeType.startsWith(
+            "image/",
+          );
+
+        if (
+          !textFile &&
+          !imageFile
+        ) {
+          errors.push(
+            `${file.name}: bu dosya türü henüz desteklenmiyor.`,
+          );
+          continue;
+        }
+
+        if (
+          file.size >
+          MAX_ATTACHMENT_BYTES
+        ) {
+          errors.push(
+            `${file.name}: 5 MB sınırını aşıyor.`,
+          );
+          continue;
+        }
+
+        if (
+          textFile &&
+          file.size >
+            MAX_TEXT_ATTACHMENT_BYTES
+        ) {
+          errors.push(
+            `${file.name}: metin dosyaları en fazla 512 KB olabilir.`,
+          );
+          continue;
+        }
+
+        try {
+          accepted.push({
+            name:
+              file.name.slice(
+                0,
+                180,
+              ) ||
+              "attachment",
+
+            mimeType,
+
+            sizeBytes:
+              file.size,
+
+            dataBase64:
+              await fileToBase64(
+                file,
+              ),
+          });
+        } catch {
+          errors.push(
+            `${file.name}: dosya okunamadı.`,
+          );
+        }
+      }
+
+      if (
+        selected.length >
+        remaining
+      ) {
+        errors.push(
+          "Bir mesaja en fazla 3 dosya ekleyebilirsin.",
+        );
+      }
+
+      if (
+        accepted.length > 0
+      ) {
+        setPendingAttachments(
+          (current) =>
+            [
+              ...current,
+              ...accepted,
+            ].slice(
+              0,
+              MAX_CHAT_ATTACHMENTS,
+            ),
+        );
+      }
+
+      setError(
+        errors[0] ?? null,
+      );
+    } finally {
+      setReadingAttachments(
+        false,
+      );
+    }
+  }
+
+  function removeAttachment(
+    index: number,
+  ) {
+    setPendingAttachments(
+      (current) =>
+        current.filter(
+          (
+            _,
+            itemIndex,
+          ) =>
+            itemIndex !== index,
+        ),
+    );
+  }
+
+  function send() {
+    const value = text.trim();
+
+    const attachments =
+      pendingAttachments;
+
+    if (
+      !value &&
+      attachments.length === 0
+    ) {
+      return;
+    }
+
+    const requestId =
+      nextProtocolId("chat");
+
+    const displayText =
+      value ||
+      "Ekli dosyayı incele.";
 
     if (
       !sendPacket({
         type: "chat.send",
         request_id: requestId,
-        origin_device_id: `desktop:${clientIdRef.current}`,
+
+        origin_device_id:
+          `desktop:${clientIdRef.current}`,
+
         text: value,
+
+        ...(attachments.length > 0
+          ? {
+              attachments:
+                attachments.map(
+                  (attachment) => ({
+                    name:
+                      attachment.name,
+
+                    mime_type:
+                      attachment.mimeType,
+
+                    size_bytes:
+                      attachment.sizeBytes,
+
+                    data_base64:
+                      attachment.dataBase64,
+                  }),
+                ),
+            }
+          : {}),
       })
     ) {
       return;
     }
 
     markInFlight(requestId);
-    setMessages((current) => [
-      ...current,
-      {
-        id: nextMessageId(),
-        role: "user",
-        text: value,
-        requestId,
-      },
-    ]);
+
+    setMessages(
+      (current) => [
+        ...current,
+        {
+          id:
+            nextMessageId(),
+
+          role:
+            "user",
+
+          text:
+            displayText,
+
+          requestId,
+
+          attachments:
+            attachments.map(
+              ({
+                name,
+                mimeType,
+                sizeBytes,
+              }) => ({
+                name,
+                mimeType,
+                sizeBytes,
+              }),
+            ),
+        },
+      ],
+    );
 
     setText("");
+
+    setPendingAttachments(
+      [],
+    );
+
     setError(null);
   }
 
@@ -1430,6 +1874,32 @@ export default function App() {
                       {message.text}
                     </div>
 
+                    {message.attachments &&
+                      message.attachments.length > 0 && (
+                        <div className="message-attachments">
+                          {message.attachments.map(
+                            (
+                              attachment,
+                              index,
+                            ) => (
+                              <span
+                                key={`${attachment.name}:${index}`}
+                              >
+                                <strong>
+                                  {attachment.name}
+                                </strong>
+
+                                <small>
+                                  {attachmentSizeLabel(
+                                    attachment.sizeBytes,
+                                  )}
+                                </small>
+                              </span>
+                            ),
+                          )}
+                        </div>
+                      )}
+
                     {message.toolResults &&
                       message.toolResults.length > 0 && (
                         <div className="tool-stack">
@@ -1563,6 +2033,69 @@ export default function App() {
               </div>
             )}
 
+            {pendingAttachments.length > 0 && (
+              <div className="attachment-strip">
+                {pendingAttachments.map(
+                  (
+                    attachment,
+                    index,
+                  ) => (
+                    <div
+                      className="attachment-chip"
+                      key={`${attachment.name}:${index}`}
+                    >
+                      <span className="attachment-kind">
+                        {attachment.mimeType.startsWith(
+                          "image/",
+                        )
+                          ? "IMG"
+                          : "FILE"}
+                      </span>
+
+                      <span className="attachment-copy">
+                        <strong
+                          title={attachment.name}
+                        >
+                          {attachment.name}
+                        </strong>
+
+                        <small>
+                          {attachmentSizeLabel(
+                            attachment.sizeBytes,
+                          )}
+                        </small>
+                      </span>
+
+                      <button
+                        type="button"
+                        aria-label={
+                          `${attachment.name} ekini kaldır`
+                        }
+                        onClick={() =>
+                          removeAttachment(
+                            index,
+                          )
+                        }
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ),
+                )}
+              </div>
+            )}
+
+            <input
+              ref={fileInputRef}
+              className="attachment-input"
+              type="file"
+              multiple
+              accept="image/*,.txt,.md,.py,.js,.ts,.tsx,.jsx,.dart,.kt,.kts,.java,.rs,.go,.c,.h,.cpp,.hpp,.cs,.json,.yaml,.yml,.toml,.xml,.html,.css,.scss,.sql,.sh,.ps1,.bat,.csv,.log,.ini,.cfg"
+              onChange={
+                handleAttachmentSelection
+              }
+            />
+
             <form
               className="composer"
               onSubmit={(event) => {
@@ -1573,10 +2106,21 @@ export default function App() {
               <button
                 className="attach"
                 type="button"
-                disabled
-                title="Dosya ekleme daha sonra"
+                disabled={
+                  connection !==
+                    "online" ||
+                  readingAttachments ||
+                  pendingAttachments.length >=
+                    MAX_CHAT_ATTACHMENTS
+                }
+                title="Dosya ekle"
+                onClick={() =>
+                  fileInputRef.current?.click()
+                }
               >
-                +
+                {readingAttachments
+                  ? "…"
+                  : "+"}
               </button>
 
               <textarea
@@ -1597,7 +2141,10 @@ export default function App() {
                 className="send"
                 type="submit"
                 disabled={
-                  !text.trim() ||
+                  (!text.trim() &&
+                    pendingAttachments.length ===
+                      0) ||
+                  readingAttachments ||
                   connection !== "online"
                 }
               >
