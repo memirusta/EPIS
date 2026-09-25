@@ -61,13 +61,20 @@ class CloudTranscriptClient:
     def headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"}
 
-    def _json(self, method: str, path: str, *, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _json(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         response = requests.request(
             method,
             self.base_url + path,
             headers=self.headers,
             json=body,
-            timeout=self.timeout,
+            timeout=self.timeout if timeout is None else float(timeout),
         )
         if response.status_code >= 400:
             detail = response.text[:500]
@@ -75,11 +82,43 @@ class CloudTranscriptClient:
                 detail = response.json().get("detail") or detail
             except Exception:
                 pass
-            raise RuntimeError(f"shared_transcript_http_{response.status_code}:{detail}")
+            raise RuntimeError(
+                f"shared_transcript_http_{response.status_code}:{detail}"
+            )
+
         payload = response.json()
         if not isinstance(payload, dict):
             raise RuntimeError("shared_transcript_invalid_response")
         return payload
+
+    def infer(self, *, stage: str, prompt: str) -> str:
+        """Run one stateless NC inference turn on the production cloud brain."""
+        normalized_stage = str(stage or "").strip().lower()
+        if normalized_stage not in {"summary", "analysis", "voice"}:
+            raise ValueError("invalid_nc_inference_stage")
+
+        prompt = str(prompt or "")
+        if not prompt.strip():
+            raise ValueError("empty_nc_inference_prompt")
+
+        result = self._json(
+            "POST",
+            "/internal/nc/infer",
+            body={
+                "stage": normalized_stage,
+                "prompt": prompt,
+            },
+            timeout=max(self.timeout, 120.0),
+        )
+
+        if not result.get("ok"):
+            raise RuntimeError("shared_nc_inference_failed")
+
+        text = result.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise RuntimeError("shared_nc_inference_empty_response")
+
+        return text.strip()
 
     def pending_days(self, *, before_day_id: str | None = None) -> list[dict[str, Any]]:
         suffix = f"?before_day_id={before_day_id}" if before_day_id else ""

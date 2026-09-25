@@ -21,7 +21,7 @@ from agentic.devices import Device
 from server.daily_transcript import build_daily_transcript_store, day_id_for
 
 
-SERVER_VERSION = "0.9.0"
+SERVER_VERSION = "0.10.0"
 DEPLOYMENT_MODE = os.getenv("EPIS_DEPLOYMENT", "local").strip().lower()
 SERVER_TOKEN = os.getenv("EPIS_SERVER_TOKEN", "").strip()
 WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "").strip()
@@ -690,6 +690,130 @@ def _require_internal_event(request: Request) -> None:
         INTERNAL_EVENT_TOKEN,
         alt_header="x-epis-internal-token",
         missing_error="EPIS_INTERNAL_EVENT_TOKEN is required in cloud mode",
+    )
+
+
+_NC_INFERENCE_STAGES = {"summary", "analysis", "voice"}
+_NC_INFERENCE_MAX_PROMPT_CHARS = 60_000
+
+
+@app.post("/internal/nc/infer")
+async def nc_infer(request: Request):
+    """Stateless inference endpoint for trusted-local Nightly Recalculation."""
+    _require_internal_event(request)
+
+    try:
+        data = await request.json()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_json",
+        ) from exc
+
+    if not isinstance(data, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_payload",
+        )
+
+    stage = str(data.get("stage") or "").strip().lower()
+    prompt = str(data.get("prompt") or "")
+
+    if stage not in _NC_INFERENCE_STAGES:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_nc_inference_stage",
+        )
+
+    if not prompt.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="empty_nc_inference_prompt",
+        )
+
+    if len(prompt) > _NC_INFERENCE_MAX_PROMPT_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail="nc_inference_prompt_too_large",
+        )
+
+    core = get_core()
+
+    try:
+        async with _core_semaphore:
+            if stage == "analysis":
+                result = await asyncio.to_thread(
+                    core.sol.analyze,
+                    prompt,
+                    {"reason": "nightly_analysis"},
+                )
+
+                if not isinstance(result, dict) or not result.get("ok"):
+                    error = (
+                        result.get("error")
+                        if isinstance(result, dict)
+                        else "invalid_sol_response"
+                    )
+                    raise RuntimeError(
+                        f"nc_analysis_failed:{error}"
+                    )
+
+                text = str(result.get("result") or "").strip()
+                model = result.get("model_used")
+
+            else:
+                system_prompt = (
+                    "You are EPIS's internal Nightly Recalculation worker. "
+                    "This is not a user-facing conversational turn. "
+                    "Follow the supplied task exactly. "
+                    "Do not call tools. "
+                    "Do not use unrelated chat history or hot context."
+                )
+
+                reply = await asyncio.to_thread(
+                    core.luna.complete,
+                    [
+                        {
+                            "role": "system",
+                            "content": system_prompt,
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt,
+                        },
+                    ],
+                    [],
+                )
+
+                if getattr(reply, "tool_calls", None):
+                    raise RuntimeError(
+                        "nc_inference_unexpected_tool_call"
+                    )
+
+                text = str(
+                    getattr(reply, "text", "") or ""
+                ).strip()
+                model = getattr(core.luna, "model", None)
+
+        if not text:
+            raise RuntimeError(
+                "nc_inference_empty_response"
+            )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=public_error_detail(exc),
+        ) from exc
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "stage": stage,
+            "text": text,
+            "model": model,
+            "time": utc_now(),
+        }
     )
 
 

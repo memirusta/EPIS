@@ -90,16 +90,24 @@ class OpenAILunaClient:
 
     def complete(self, messages: list[dict], tools: list[dict]) -> LunaReply:
         started = perf_counter()
-        response = self._client().chat.completions.create(
-            model=self.model,
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-            parallel_tool_calls=False,
-            store=False,
-            max_completion_tokens=2048,
-            reasoning_effort=self.reasoning_effort,
-        )
+        request = {
+            "model": self.model,
+            "messages": messages,
+            "store": False,
+            "max_completion_tokens": 2048,
+            "reasoning_effort": self.reasoning_effort,
+        }
+
+        if tools:
+            request.update(
+                {
+                    "tools": tools,
+                    "tool_choice": "auto",
+                    "parallel_tool_calls": False,
+                }
+            )
+
+        response = self._client().chat.completions.create(**request)
         self._record_usage(
             getattr(response, "usage", None),
             round((perf_counter() - started) * 1000),

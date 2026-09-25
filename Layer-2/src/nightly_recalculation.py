@@ -51,28 +51,42 @@ class NightlyConversation:
 
     MAX_TURNS = 3
 
-    def __init__(self, model: str, router: EpisRouter, context: dict = None):
-        self.model   = model
-        self.router  = router
+    def __init__(
+        self,
+        *,
+        stage: str,
+        client,
+        model_label: str,
+        context: dict | None = None,
+    ):
+        self.stage = stage
+        self.client = client
+        self.model = model_label
         self.context = context or {}
         self.history = []
-        self.turn    = 0
+        self.turn = 0
 
     def send(self, message: str) -> str:
         if self.turn >= self.MAX_TURNS:
-            logger.warning(f"[{self.model}] Max tur asildi -- son yanit kullaniliyor.")
+            logger.warning(
+                f"[{self.model}] Max tur asildi -- son yanit kullaniliyor."
+            )
             return self.last_response()
 
         full_prompt = self._build_prompt(message)
-        response    = self.router._dispatch_to_layer3(
-            model=self.model, payload=full_prompt, context=self.context,
+        response = self.client.infer(
+            stage=self.stage,
+            prompt=full_prompt,
         )
 
-        self.history.append({"role": "epis",  "content": message})
+        self.history.append({"role": "epis", "content": message})
         self.history.append({"role": "model", "content": response})
         self.turn += 1
 
-        logger.info(f"[{self.model}] Tur {self.turn}/{self.MAX_TURNS} -- {len(response)} kar.")
+        logger.info(
+            f"[{self.model}/{self.stage}] Tur "
+            f"{self.turn}/{self.MAX_TURNS} -- {len(response)} kar."
+        )
         return response
 
     def last_response(self) -> str:
@@ -258,15 +272,30 @@ class NightlyRecalculation:
 
             analysis = self._parse_analysis(analysis_raw)
 
-            summary  = self.router.privacy.deanonymize(summary, self._pseudonym_map)
-            analysis = self._deanonymize_obj(analysis)
-
-            epis_voice, s3_log = self._stage3_epis_voice(summary, analysis)
+            # All cloud inference sees privacy-filtered / pseudonymized
+            # material only. Restoration happens locally afterwards.
+            epis_voice, s3_log = self._stage3_epis_voice(
+                summary,
+                analysis,
+            )
             self.report["stages"]["stage3_epis"] = (
-                f"OK ({s3_log.get('chars', 0)} kar.)" if epis_voice else "SKIP"
+                f"OK ({s3_log.get('chars', 0)} kar.)"
+                if epis_voice
+                else "SKIP"
             )
             self.report["conversation_logs"]["stage3"] = s3_log
+
+            summary = self.router.privacy.deanonymize(
+                summary,
+                self._pseudonym_map,
+            )
+            analysis = self._deanonymize_obj(analysis)
+
             if epis_voice:
+                epis_voice = self.router.privacy.deanonymize(
+                    epis_voice,
+                    self._pseudonym_map,
+                )
                 self.report["epis_voice"] = epis_voice
 
             # AUTHORITATIVE LONG-TERM COMMIT.  Nothing on the cloud may be
@@ -563,14 +592,19 @@ class NightlyRecalculation:
             return obj
 
     # ------------------------------------------------------------------
-    # 3. STAGE 1 -- GEMINI
+    # 3. STAGE 1 -- PRODUCTION LUNA
     # ------------------------------------------------------------------
 
     def _stage1_summarize(self, safe_data: dict) -> tuple[str, dict]:
-        model = self.router.routing_table.get("hybrid_stage_1", "gemini-2.0-flash")
-        conv  = NightlyConversation(
-            model=model, router=self.router,
-            context={"stage": "nightly_stage1", "date": self.today.isoformat()},
+        model = "production-luna"
+        conv = NightlyConversation(
+            stage="summary",
+            client=self._get_transcript_client(),
+            model_label=model,
+            context={
+                "stage": "nightly_stage1",
+                "date": self.today.isoformat(),
+            },
         )
 
         interaction_count = len(safe_data.get("interactions", []))
@@ -649,14 +683,19 @@ Kisisel isim KULLANMA -- [KNOWN_USER] formatini koru."""
         return {"ok": False, "issues": issues, "followup": " ".join(followup_parts)}
 
     # ------------------------------------------------------------------
-    # 4. STAGE 2 -- CLAUDE OPUS
+    # 4. STAGE 2 -- PRODUCTION SOL
     # ------------------------------------------------------------------
 
     def _stage2_analyze(self, summary: str) -> tuple[str, dict]:
-        model = self.router.routing_table.get("hybrid_stage_2", "claude-opus-4-8")
-        conv  = NightlyConversation(
-            model=model, router=self.router,
-            context={"stage": "nightly_stage2", "date": self.today.isoformat()},
+        model = "production-sol"
+        conv = NightlyConversation(
+            stage="analysis",
+            client=self._get_transcript_client(),
+            model_label=model,
+            context={
+                "stage": "nightly_stage2",
+                "date": self.today.isoformat(),
+            },
         )
 
         json_schema = """{
@@ -755,57 +794,109 @@ YALNIZCA asagidaki JSON formatinda yanitla. Baska hicbir sey yazma.
     # 4b. STAGE 3 — EPIS SESI (Layer-1 karakter)
     # ------------------------------------------------------------------
 
-    def _stage3_epis_voice(self, summary: str, analysis: dict) -> tuple[str, dict]:
-        """
-        Ucuncu tur: ozet+analiz uzerine EPIS kendi sesiyle kisa yorum.
-        Yerel Qwen (QWEN_BASE_URL) — RunPod kredisini yakmaz.
-        """
-        log = {"turns": 0, "model": os.getenv("QWEN_MODEL", "qwen3.5:9b"), "chars": 0}
-        analysis_slim = {
-            "mood_estimate":       analysis.get("mood_estimate"),
-            "energy_level":        analysis.get("energy_level"),
-            "stress_signal":       analysis.get("stress_signal"),
-            "behavioral_insights": (analysis.get("behavioral_insights") or [])[:4],
-            "tomorrow_context":    analysis.get("tomorrow_context"),
-            "epis_learnings":      (analysis.get("epis_learnings") or [])[:3],
+    def _stage3_epis_voice(
+        self,
+        summary: str,
+        analysis: dict,
+    ) -> tuple[str, dict]:
+        """Generate the morning note through stateless production Luna."""
+
+        log = {
+            "turns": 0,
+            "model": "production-luna",
+            "chars": 0,
         }
+
+        analysis_slim = {
+            "mood_estimate": analysis.get("mood_estimate"),
+            "energy_level": analysis.get("energy_level"),
+            "stress_signal": analysis.get("stress_signal"),
+            "behavioral_insights": (
+                analysis.get("behavioral_insights") or []
+            )[:4],
+            "tomorrow_context": analysis.get("tomorrow_context"),
+            "epis_learnings": (
+                analysis.get("epis_learnings") or []
+            )[:3],
+        }
+
         user_msg = (
-            "Gece analizi bitti. kullanıcıya sabah iletecegin kisa yorumu yaz.\n\n"
+            "Gece analizi bitti. Kullaniciya sabah iletecegin "
+            "kisa yorumu yaz.\n\n"
             f"## Stage-1 ozet\n{summary[:1400]}\n\n"
-            f"## Stage-2 analiz\n{json.dumps(analysis_slim, ensure_ascii=False, indent=2)}\n\n"
+            "## Stage-2 analiz\n"
+            f"{json.dumps(analysis_slim, ensure_ascii=False, indent=2)}\n\n"
             "Kurallar:\n"
-            "- Sen EPIS'sin; kullanıcının uyku/beden/olcum verisini kendi yasantin gibi sahiplenme.\n"
+            "- Sen EPIS'sin; kullanicinin uyku/beden/olcum verisini "
+            "kendi yasantin gibi sahiplenme.\n"
             "- 2-5 cumle, samimi, kisa. Yargilama / vaaz yok.\n"
             "- Ne fark ettigini ve yarin icin tek bir not ekle.\n"
             '- Yanit YALNIZCA JSON: {"type":"direct","message":"..."}'
         )
 
-        prev_think = os.environ.get("QWEN_THINK")
-        os.environ["QWEN_THINK"] = "false"
-        try:
-            from epis_core import build_system_prompt, Layer1Engine
+        conv = NightlyConversation(
+            stage="voice",
+            client=self._get_transcript_client(),
+            model_label=log["model"],
+            context={
+                "stage": "nightly_stage3",
+                "date": self.today.isoformat(),
+            },
+        )
 
-            engine = Layer1Engine(build_system_prompt(), backend="qwen")
-            parsed = engine.send(user_msg)
-            log["turns"] = 1
-            msg = (parsed.get("message") or "").strip()
-            if not msg and parsed.get("type") == "tool_call":
-                msg = (parsed.get("bridge_message") or "").strip()
+        def parse_message(raw: str) -> str:
+            clean = str(raw or "").strip()
+
+            if clean.startswith("```"):
+                lines = clean.split("\n")
+                if len(lines) > 2:
+                    clean = "\n".join(lines[1:-1])
+
+            try:
+                parsed = json.loads(clean)
+            except json.JSONDecodeError:
+                return ""
+
+            if not isinstance(parsed, dict):
+                return ""
+
+            if parsed.get("type") != "direct":
+                return ""
+
+            return str(parsed.get("message") or "").strip()
+
+        try:
+            response = conv.send(user_msg)
+            msg = parse_message(response)
+
+            if not msg:
+                response = conv.send(
+                    'Yanit gecersizdi. YALNIZCA gecerli JSON dondur: '
+                    '{"type":"direct","message":"2-5 cumlelik mesaj"}'
+                )
+                msg = parse_message(response)
+
+            log["turns"] = conv.turn
             log["chars"] = len(msg)
+
             if msg:
-                logger.info(f"Stage 3 EPIS sesi: {len(msg)} kar.")
+                logger.info(
+                    f"Stage 3 EPIS sesi: {len(msg)} kar."
+                )
             else:
-                logger.warning("Stage 3: bos EPIS sesi")
+                logger.warning(
+                    "Stage 3: bos veya gecersiz EPIS sesi"
+                )
+
             return msg, log
-        except Exception as e:
-            logger.warning(f"Stage 3 atlandi (Layer-1/Qwen): {e}")
-            log["error"] = str(e)[:200]
+
+        except Exception as exc:
+            logger.warning(
+                f"Stage 3 atlandi (production Luna): {exc}"
+            )
+            log["error"] = str(exc)[:200]
             return "", log
-        finally:
-            if prev_think is None:
-                os.environ.pop("QWEN_THINK", None)
-            else:
-                os.environ["QWEN_THINK"] = prev_think
+
 
     # ------------------------------------------------------------------
     # 5. ANALIZ PARSE
@@ -965,14 +1056,9 @@ YALNIZCA asagidaki JSON formatinda yanitla. Baska hicbir sey yazma.
                 "Sapma yoksa sadece 'Sapma tespit edilmedi.' yaz."
             )
 
-            drift_model = self.router.routing_table.get(
-                "hybrid_stage_2",
-                self.router.routing_table.get("deep_analysis", "claude-opus-4-8"),
-            )
-            result = self.router._dispatch_to_layer3(
-                model=drift_model,
-                payload=self.router._apply_privacy_layer(prompt),
-                context={"stage": "drift_check", "date": self.today.isoformat()},
+            result = self._get_transcript_client().infer(
+                stage="analysis",
+                prompt=self.router._apply_privacy_layer(prompt),
             )
 
             if "sapma tespit edilmedi" not in result.lower():
