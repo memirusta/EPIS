@@ -394,4 +394,11 @@ def build_local_registry() -> ToolRegistry:
     register_spotify_tools(registry)
     register_ui_tools(registry)
     register_trusted_context_tools(registry)
+    from .whatsapp_outreach import (
+        register_whatsapp_device_tools,
+    )
+    register_whatsapp_device_tools(
+        registry
+    )
+
     return registry

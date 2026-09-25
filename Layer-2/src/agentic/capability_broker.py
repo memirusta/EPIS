@@ -541,6 +541,39 @@ def default_capability_specs() -> list[CapabilitySpec]:
             "image",
         ),
         CapabilitySpec(
+            "whatsapp_send_to_contact",
+            (
+                "Send one WhatsApp message to a trusted resolved contact. "
+                "Use only when the user explicitly asks EPIS in the current "
+                "turn to contact that person. contact_ref is a human-facing "
+                "name or alias; the trusted provider resolves it deterministically. "
+                "Never invent phone numbers, JIDs or raw recipient identifiers."
+            ),
+            _schema(
+                {
+                    "contact_ref": {
+                        "type": "string",
+                        "maxLength": 200,
+                    },
+                    "message": {
+                        "type": "string",
+                        "maxLength": 4000,
+                    },
+                },
+                (
+                    "contact_ref",
+                    "message",
+                ),
+            ),
+            "whatsapp.send_to_contact",
+            "whatsapp",
+            risk_class=RiskClass.YELLOW.value,
+            confirmation_required=True,
+            confirmation_notice=(
+                "Bu işlem üçüncü bir kişiye WhatsApp mesajı gönderecek."
+            ),
+        ),
+        CapabilitySpec(
             "voice_speak",
             (
                 "Speak text through the configured voice provider and return an "

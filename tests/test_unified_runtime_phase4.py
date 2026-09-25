@@ -189,7 +189,7 @@ class RepositoryRuntimePhase4Tests(unittest.TestCase):
         self.assertIn("bind_repository", names)
         self.assertIn("repository_snapshot", names)
         self.assertIn("save_repository_context", names)
-        self.assertEqual(len(registry.specs()), 63)
+        self.assertEqual(len(registry.specs()), 65)
 
         schema = {
             "type": "object",

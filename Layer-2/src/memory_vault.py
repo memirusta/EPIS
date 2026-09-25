@@ -25,7 +25,7 @@ from typing import Any, Iterable
 import uuid
 
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2  # external_outreach_schema_v1
 _TOKEN_RE = re.compile(r"[\wçğıöşüÇĞİÖŞÜ-]{2,}", re.UNICODE)
 _STOPWORDS = {
     "acaba", "ama", "artık", "bana", "ben", "beni", "benim", "bir", "biri",
@@ -218,6 +218,30 @@ class LocalMemoryVault:
                     error_enc TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY(day_id, input_hash)
                 );
+
+                CREATE TABLE IF NOT EXISTS external_outreach (
+                    outreach_id TEXT PRIMARY KEY,
+                    person_id TEXT NOT NULL REFERENCES people(id),
+                    provider TEXT NOT NULL,
+                    provider_contact_ref_enc TEXT NOT NULL,
+                    outbound_message_enc TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    provider_message_ref_enc TEXT NOT NULL DEFAULT '',
+                    provider_message_fingerprint TEXT,
+                    error_enc TEXT NOT NULL DEFAULT '',
+                    reply_memory_id TEXT REFERENCES memories(id),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    replied_at TEXT
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_external_outreach_provider_message
+                ON external_outreach(
+                    provider,
+                    provider_message_fingerprint
+                )
+                WHERE provider_message_fingerprint IS NOT NULL;
 
                 CREATE TABLE IF NOT EXISTS memory_changes (
                     id TEXT PRIMARY KEY,
@@ -766,6 +790,899 @@ class LocalMemoryVault:
                 "confidence": float(row["confidence"] or 0.0),
             }
         return {"people": people}
+
+    def create_external_outreach(
+        self,
+        *,
+        outreach_id: str,
+        person_id: str,
+        provider_contact_ref: str,
+        outbound_message: str,
+        provider: str = "whatsapp",
+    ) -> dict[str, Any]:
+        """Create local durable state before any external send occurs."""
+
+        clean_outreach_id = str(
+            outreach_id or ""
+        ).strip()
+
+        clean_person_id = str(
+            person_id or ""
+        ).strip()
+
+        clean_provider = str(
+            provider or ""
+        ).strip()
+
+        clean_contact_ref = str(
+            provider_contact_ref or ""
+        ).strip()
+
+        clean_message = str(
+            outbound_message or ""
+        ).strip()
+
+        if not clean_outreach_id:
+            raise ValueError(
+                "outreach_id_required"
+            )
+
+        if not clean_person_id:
+            raise ValueError(
+                "person_id_required"
+            )
+
+        if not clean_provider:
+            raise ValueError(
+                "provider_required"
+            )
+
+        if not clean_contact_ref:
+            raise ValueError(
+                "provider_contact_ref_required"
+            )
+
+        if not clean_message:
+            raise ValueError(
+                "outbound_message_required"
+            )
+
+        now = _utc_now()
+
+        with self._lock, self._connection() as conn:
+            person = conn.execute(
+                """
+                SELECT id
+                FROM people
+                WHERE id=?
+                """,
+                (
+                    clean_person_id,
+                ),
+            ).fetchone()
+
+            if person is None:
+                raise ValueError(
+                    "person_not_found"
+                )
+
+            existing = conn.execute(
+                """
+                SELECT
+                    outreach_id,
+                    person_id,
+                    provider,
+                    status
+                FROM external_outreach
+                WHERE outreach_id=?
+                """,
+                (
+                    clean_outreach_id,
+                ),
+            ).fetchone()
+
+            if existing is not None:
+                if (
+                    str(existing["person_id"])
+                    != clean_person_id
+                    or str(existing["provider"])
+                    != clean_provider
+                ):
+                    raise ValueError(
+                        "outreach_id_conflict"
+                    )
+
+                return {
+                    "outreach_id":
+                        str(
+                            existing[
+                                "outreach_id"
+                            ]
+                        ),
+                    "status":
+                        str(
+                            existing[
+                                "status"
+                            ]
+                        ),
+                    "already_exists":
+                        True,
+                }
+
+            conn.execute(
+                """
+                INSERT INTO external_outreach(
+                    outreach_id,
+                    person_id,
+                    provider,
+                    provider_contact_ref_enc,
+                    outbound_message_enc,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                VALUES(
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    'dispatching',
+                    ?,
+                    ?
+                )
+                """,
+                (
+                    clean_outreach_id,
+                    clean_person_id,
+                    clean_provider,
+                    self._enc(
+                        clean_contact_ref
+                    ),
+                    self._enc(
+                        clean_message
+                    ),
+                    now,
+                    now,
+                ),
+            )
+
+        return {
+            "outreach_id":
+                clean_outreach_id,
+            "status":
+                "dispatching",
+            "already_exists":
+                False,
+        }
+
+    def mark_external_outreach_sent(
+        self,
+        *,
+        outreach_id: str,
+        provider_message_ref: str,
+    ) -> dict[str, Any]:
+        clean_outreach_id = str(
+            outreach_id or ""
+        ).strip()
+
+        clean_message_ref = str(
+            provider_message_ref or ""
+        ).strip()
+
+        if not clean_outreach_id:
+            raise ValueError(
+                "outreach_id_required"
+            )
+
+        if not clean_message_ref:
+            raise ValueError(
+                "provider_message_ref_required"
+            )
+
+        now = _utc_now()
+
+        with self._lock, self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT provider
+                FROM external_outreach
+                WHERE outreach_id=?
+                """,
+                (
+                    clean_outreach_id,
+                ),
+            ).fetchone()
+
+            if row is None:
+                raise ValueError(
+                    "outreach_not_found"
+                )
+
+            provider = str(
+                row["provider"]
+                or ""
+            )
+
+            fingerprint = hashlib.sha256(
+                (
+                    provider
+                    + "\0"
+                    + clean_message_ref
+                ).encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+
+            conn.execute(
+                """
+                UPDATE external_outreach
+                SET
+                    status='sent',
+                    provider_message_ref_enc=?,
+                    provider_message_fingerprint=?,
+                    error_enc='',
+                    updated_at=?
+                WHERE outreach_id=?
+                """,
+                (
+                    self._enc(
+                        clean_message_ref
+                    ),
+                    fingerprint,
+                    now,
+                    clean_outreach_id,
+                ),
+            )
+
+        return {
+            "outreach_id":
+                clean_outreach_id,
+            "status":
+                "sent",
+        }
+
+    def mark_external_outreach_failed(
+        self,
+        *,
+        outreach_id: str,
+        error: str,
+    ) -> None:
+        clean_outreach_id = str(
+            outreach_id or ""
+        ).strip()
+
+        if not clean_outreach_id:
+            return
+
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """
+                UPDATE external_outreach
+                SET
+                    status='failed',
+                    error_enc=?,
+                    updated_at=?
+                WHERE outreach_id=?
+                """,
+                (
+                    self._enc(
+                        str(error or "")[
+                            :2000
+                        ]
+                    ),
+                    _utc_now(),
+                    clean_outreach_id,
+                ),
+            )
+
+    def accept_external_outreach_reply(
+        self,
+        *,
+        provider_message_ref: str,
+        provider_contact_ref: str,
+        content: str,
+        provider: str = "whatsapp",
+        confidence: float = 0.65,
+    ) -> dict[str, Any]:
+        """Correlate one reply and store it as non-authoritative evidence."""
+
+        clean_provider = str(
+            provider or ""
+        ).strip()
+
+        clean_message_ref = str(
+            provider_message_ref or ""
+        ).strip()
+
+        clean_contact_ref = str(
+            provider_contact_ref or ""
+        ).strip()
+
+        clean_content = str(
+            content or ""
+        ).strip()
+
+        if (
+            not clean_provider
+            or not clean_message_ref
+        ):
+            return {
+                "status":
+                    "unmatched",
+            }
+
+        if not clean_content:
+            return {
+                "status":
+                    "empty_reply",
+            }
+
+        fingerprint = hashlib.sha256(
+            (
+                clean_provider
+                + "\0"
+                + clean_message_ref
+            ).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+
+        with self._lock, self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    outreach_id,
+                    person_id,
+                    provider_contact_ref_enc,
+                    status,
+                    reply_memory_id
+                FROM external_outreach
+                WHERE
+                    provider=?
+                    AND provider_message_fingerprint=?
+                """,
+                (
+                    clean_provider,
+                    fingerprint,
+                ),
+            ).fetchone()
+
+        if row is None:
+            return {
+                "status":
+                    "unmatched",
+            }
+
+        expected_contact_ref = self._dec(
+            row[
+                "provider_contact_ref_enc"
+            ]
+        )
+
+        # The reply must belong to the same provider-side contact
+        # the original message was sent to.
+        if (
+            not clean_contact_ref
+            or clean_contact_ref
+            != expected_contact_ref
+        ):
+            return {
+                "status":
+                    "sender_mismatch",
+            }
+
+        outreach_id = str(
+            row["outreach_id"]
+        )
+
+        person_id = str(
+            row["person_id"]
+        )
+
+        if (
+            str(row["status"])
+            == "replied"
+        ):
+            return {
+                "status":
+                    "duplicate",
+
+                "outreach_id":
+                    outreach_id,
+
+                "person_id":
+                    person_id,
+
+                "memory_id":
+                    str(
+                        row[
+                            "reply_memory_id"
+                        ]
+                        or ""
+                    ),
+            }
+
+        if (
+            str(row["status"])
+            != "sent"
+        ):
+            return {
+                "status":
+                    "not_pending",
+
+                "outreach_id":
+                    outreach_id,
+            }
+
+        stored = (
+            self.record_external_perspective(
+                person_id=
+                    person_id,
+
+                content=
+                    clean_content,
+
+                confidence=
+                    confidence,
+
+                outreach_id=
+                    outreach_id,
+
+                provider=
+                    clean_provider,
+            )
+        )
+
+        memory_id = str(
+            stored["memory_id"]
+        )
+
+        now = _utc_now()
+
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """
+                UPDATE external_outreach
+                SET
+                    status='replied',
+                    reply_memory_id=?,
+                    replied_at=?,
+                    updated_at=?
+                WHERE
+                    outreach_id=?
+                    AND status='sent'
+                """,
+                (
+                    memory_id,
+                    now,
+                    now,
+                    outreach_id,
+                ),
+            )
+
+        return {
+            "status":
+                "accepted",
+
+            "outreach_id":
+                outreach_id,
+
+            "person_id":
+                person_id,
+
+            "memory_id":
+                memory_id,
+
+            "confidence":
+                float(
+                    stored[
+                        "confidence"
+                    ]
+                ),
+
+            "user_authoritative":
+                False,
+        }
+
+    def resolve_contact_ref(
+        self,
+        contact_ref: str,
+    ) -> dict[str, Any]:
+        """Resolve a human-facing name/alias to one trusted WhatsApp contact.
+
+        Transport identifiers stay opaque. This method never returns a phone
+        number or JID; only the provider-owned contact_ref stored in local
+        encrypted/private memory metadata.
+        """
+
+        def fold(value: str) -> str:
+            table = str.maketrans({
+                "ç": "c",
+                "ğ": "g",
+                "ı": "i",
+                "ö": "o",
+                "ş": "s",
+                "ü": "u",
+                "Ç": "c",
+                "Ğ": "g",
+                "İ": "i",
+                "I": "i",
+                "Ö": "o",
+                "Ş": "s",
+                "Ü": "u",
+            })
+
+            return (
+                str(value or "")
+                .translate(table)
+                .casefold()
+                .strip()
+            )
+
+        wanted = fold(contact_ref)
+
+        if not wanted:
+            return {
+                "status": "not_found",
+            }
+
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    canonical_name_enc,
+                    aliases_enc,
+                    metadata_json
+                FROM people
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+
+        matches = []
+
+        for row in rows:
+            canonical_name = self._dec(
+                row["canonical_name_enc"]
+            )
+
+            try:
+                aliases = json.loads(
+                    self._dec(
+                        row["aliases_enc"]
+                    )
+                    or "[]"
+                )
+            except json.JSONDecodeError:
+                aliases = []
+
+            if not isinstance(
+                aliases,
+                list,
+            ):
+                aliases = []
+
+            names = [
+                canonical_name,
+                *[
+                    str(alias)
+                    for alias in aliases
+                    if isinstance(
+                        alias,
+                        str,
+                    )
+                ],
+            ]
+
+            if not any(
+                fold(name) == wanted
+                for name in names
+            ):
+                continue
+
+            try:
+                metadata = json.loads(
+                    row["metadata_json"]
+                    or "{}"
+                )
+            except json.JSONDecodeError:
+                metadata = {}
+
+            if not isinstance(
+                metadata,
+                dict,
+            ):
+                metadata = {}
+
+            whatsapp = metadata.get(
+                "whatsapp"
+            )
+
+            if not isinstance(
+                whatsapp,
+                dict,
+            ):
+                whatsapp = {}
+
+            matches.append({
+                "person_id":
+                    str(row["id"]),
+
+                "canonical_name":
+                    canonical_name,
+
+                "allowlisted":
+                    whatsapp.get(
+                        "allowlisted"
+                    )
+                    is True,
+
+                "provider_contact_ref":
+                    str(
+                        whatsapp.get(
+                            "contact_ref"
+                        )
+                        or ""
+                    ).strip(),
+            })
+
+        if not matches:
+            return {
+                "status": "not_found",
+            }
+
+        if len(matches) > 1:
+            return {
+                "status": "ambiguous",
+                "candidate_count":
+                    len(matches),
+            }
+
+        match = matches[0]
+
+        if not match["allowlisted"]:
+            return {
+                "status":
+                    "not_allowlisted",
+
+                "person_id":
+                    match["person_id"],
+
+                "canonical_name":
+                    match[
+                        "canonical_name"
+                    ],
+            }
+
+        if not match[
+            "provider_contact_ref"
+        ]:
+            return {
+                "status":
+                    "not_configured",
+
+                "person_id":
+                    match["person_id"],
+
+                "canonical_name":
+                    match[
+                        "canonical_name"
+                    ],
+            }
+
+        return {
+            "status": "resolved",
+
+            "person_id":
+                match["person_id"],
+
+            "canonical_name":
+                match[
+                    "canonical_name"
+                ],
+
+            # Opaque provider-owned identifier.
+            # Never a raw number/JID.
+            "provider_contact_ref":
+                match[
+                    "provider_contact_ref"
+                ],
+        }
+
+    def record_external_perspective(
+        self,
+        *,
+        person_id: str,
+        content: str,
+        confidence: float = 0.5,
+        outreach_id: str | None = None,
+        source_day: str | None = None,
+        provider: str = "whatsapp",
+    ) -> dict[str, Any]:
+        """Store third-party evidence without granting it self-authority."""
+
+        clean_person_id = str(
+            person_id or ""
+        ).strip()
+
+        clean_content = str(
+            content or ""
+        ).strip()
+
+        if not clean_person_id:
+            raise ValueError(
+                "person_id_required"
+            )
+
+        if not clean_content:
+            raise ValueError(
+                "external_perspective_content_required"
+            )
+
+        # Third-party-only evidence can never exceed 0.75.
+        capped_confidence = max(
+            0.0,
+            min(
+                0.75,
+                float(confidence),
+            ),
+        )
+
+        now = _utc_now()
+
+        day_id = (
+            str(source_day).strip()
+            if source_day
+            else now[:10]
+        )
+
+        with self._lock, self._connection() as conn:
+            person = conn.execute(
+                """
+                SELECT id
+                FROM people
+                WHERE id=?
+                """,
+                (
+                    clean_person_id,
+                ),
+            ).fetchone()
+
+            if person is None:
+                raise ValueError(
+                    "person_not_found"
+                )
+
+            subject = (
+                "person:"
+                + clean_person_id
+            )
+
+            fingerprint = (
+                _content_fingerprint(
+                    "external_perspective",
+                    subject,
+                    clean_content,
+                )
+            )
+
+            memory_id = (
+                uuid.uuid4().hex
+            )
+
+            metadata = {
+                "provider":
+                    str(provider or ""),
+            }
+
+            if outreach_id:
+                metadata[
+                    "outreach_id"
+                ] = str(outreach_id)
+
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO memories
+                    (
+                        id,
+                        kind,
+                        subject,
+                        content_fingerprint,
+                        content_enc,
+                        confidence,
+                        source_day,
+                        provenance,
+                        valid_from,
+                        user_authoritative,
+                        metadata_json,
+                        created_at,
+                        updated_at
+                    )
+                VALUES(
+                    ?,
+                    'external_perspective',
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    'external_perspective',
+                    ?,
+                    0,
+                    ?,
+                    ?,
+                    ?
+                )
+                """,
+                (
+                    memory_id,
+                    subject,
+                    fingerprint,
+                    self._enc(
+                        clean_content
+                    ),
+                    capped_confidence,
+                    day_id,
+                    day_id,
+                    _json(metadata),
+                    now,
+                    now,
+                ),
+            )
+
+            row = conn.execute(
+                """
+                SELECT
+                    id,
+                    confidence,
+                    provenance,
+                    user_authoritative
+                FROM memories
+                WHERE
+                    kind='external_perspective'
+                    AND subject=?
+                    AND content_fingerprint=?
+                    AND source_day=?
+                """,
+                (
+                    subject,
+                    fingerprint,
+                    day_id,
+                ),
+            ).fetchone()
+
+        if row is None:
+            raise RuntimeError(
+                "external_perspective_write_failed"
+            )
+
+        return {
+            "memory_id":
+                str(row["id"]),
+
+            "kind":
+                "external_perspective",
+
+            "confidence":
+                float(
+                    row["confidence"]
+                    or 0.0
+                ),
+
+            "provenance":
+                str(
+                    row["provenance"]
+                    or ""
+                ),
+
+            "user_authoritative":
+                bool(
+                    row[
+                        "user_authoritative"
+                    ]
+                ),
+        }
 
     def migrate_legacy_once(self, memory_dir: str | os.PathLike[str], identity_dir: str | os.PathLike[str]) -> dict[str, int]:
         marker = "legacy_migration_v1"

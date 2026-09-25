@@ -12,6 +12,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agentic.devices import DeviceRegistry, LocalDeviceAgent
 from agentic.permissions import PermissionEngine
 from agentic.tools import build_local_registry
+from agentic.whatsapp_outreach import (
+    WHATSAPP_DEVICE_CAPABILITIES,
+    whatsapp_device_runtime_available,
+)
 
 PROTOCOL_VERSION = 1
 MAX_FRAME = 2 * 1024 * 1024
@@ -19,11 +23,27 @@ MAX_FRAME = 2 * 1024 * 1024
 
 class DeviceWorker:
     def __init__(self, registry=None, receipt_store=None, allowed_capabilities=None):
+        using_default_registry = (
+            registry is None
+        )
         self.registry = registry or build_local_registry()
         self.local = LocalDeviceAgent(DeviceRegistry(), self.registry.dispatch_capability,
                                       self.registry.capabilities())
         self.permissions = PermissionEngine()
         self.receipts = receipt_store if receipt_store is not None else {}
+
+        # Phase 1D registers the hidden protocol contracts on both
+        # cloud and device registries, but production must not
+        # advertise them until a real local WhatsApp bridge has
+        # explicitly configured the default controller.
+        if (
+            using_default_registry
+            and not whatsapp_device_runtime_available()
+        ):
+            self.local.device.capabilities.difference_update(
+                WHATSAPP_DEVICE_CAPABILITIES
+            )
+
         if allowed_capabilities is not None:
             self.local.device.capabilities.intersection_update(allowed_capabilities)
 

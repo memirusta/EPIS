@@ -408,6 +408,27 @@ class AgentCore:
         except ValueError:
             pass
 
+        if (
+            self.capability_broker.get(
+                "whatsapp_send_to_contact"
+            )
+            is not None
+        ):
+            from .whatsapp_outreach import (
+                CoreWhatsappOutreachProvider,
+            )
+
+            try:
+                self.capability_broker.register_provider(
+                    CoreWhatsappOutreachProvider(
+                        self
+                    )
+                )
+            except ValueError:
+                # A trusted host may deliberately inject an
+                # equivalent provider with the same provider ID.
+                pass
+
     def _restore_hot_history(
         self,
     ) -> int:

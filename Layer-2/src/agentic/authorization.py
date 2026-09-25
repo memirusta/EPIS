@@ -93,6 +93,31 @@ class SessionAuthorizationPolicy:
         "yayinlama", "submit etme",
     )
 
+    _WHATSAPP_ACTION_TERMS = (
+        "whatsapp",
+        "whatsapptan",
+        "whatsapp'tan",
+        "mesaj at",
+        "mesaj gonder",
+        "mesaj yolla",
+        "mesaj ilet",
+        "sor ",
+        "sorsana",
+        "sorar misin",
+        "sorabilir misin",
+        "ask ",
+    )
+
+    _WHATSAPP_DENIAL_TERMS = (
+        "sorma",
+        "sormadan",
+        "mesaj atma",
+        "mesaj gonderme",
+        "mesaj yollama",
+        "whatsapptan gonderme",
+        "whatsapp'tan gonderme",
+    )
+
     _COMPUTER_ACTION_TERMS = (
         "ac ", "ac,", "acip", "kapat", "tikla", "tiklay", "yaz ", "yazip",
         "sec ", "secip", "gec ", "gecip", "surukle", "kaydir", "odakla",
@@ -153,6 +178,9 @@ class SessionAuthorizationPolicy:
 
     @classmethod
     def classify(cls, capability: str, arguments: dict) -> str | None:
+
+        if capability == "whatsapp.send_to_contact":
+            return "external_communication"
         if capability in cls.FILE_MUTATION_CAPABILITIES:
             return "file_mutation"
 
@@ -185,6 +213,69 @@ class SessionAuthorizationPolicy:
         return False
 
     @classmethod
+    def _whatsapp_denied_current_turn(
+        cls,
+        user_message: str,
+    ) -> bool:
+        text = _fold(user_message)
+
+        return (
+            cls._denied_by_current_turn(
+                "external_communication",
+                user_message,
+            )
+            or any(
+                term in text
+                for term
+                in cls._WHATSAPP_DENIAL_TERMS
+            )
+        )
+
+    @classmethod
+    def _explicit_whatsapp_current_turn(
+        cls,
+        arguments: dict,
+        user_message: str,
+    ) -> bool:
+        text = _fold(user_message)
+
+        if not text:
+            return False
+
+        if cls._whatsapp_denied_current_turn(
+            user_message
+        ):
+            return False
+
+        has_action = any(
+            term in text
+            for term
+            in cls._WHATSAPP_ACTION_TERMS
+        )
+
+        if not has_action:
+            return False
+
+        contact_ref = _fold(
+            arguments.get(
+                "contact_ref",
+                "",
+            )
+        )
+
+        # "Birine sor istersen" gibi assistant-originated
+        # belirsiz hedefler otomatik outreach yetkisi değildir.
+        target_is_explicit = (
+            bool(
+                contact_ref
+                and contact_ref in text
+            )
+            or "whatsapp" in text
+        )
+
+        return target_is_explicit
+
+    @classmethod
     def _explicit_current_turn(cls, category: str, user_message: str) -> bool:
         if category in cls.ALWAYS_CONFIRM:
             return False
@@ -213,6 +304,41 @@ class SessionAuthorizationPolicy:
         return any(term in text for term in cls._CATEGORY_CONTEXT.get(category, ()))
 
     def evaluate(self, capability: str, arguments: dict, user_message: str) -> AuthorizationDecision:
+
+        # WhatsApp outreach is stricter than generic external
+        # communication: an old session grant may never silently
+        # authorize contacting a third party.
+        if capability == "whatsapp.send_to_contact":
+            category = "external_communication"
+
+            if self._whatsapp_denied_current_turn(
+                user_message
+            ):
+                return AuthorizationDecision(
+                    category,
+                    False,
+                    "user_denied",
+                    False,
+                    denied=True,
+                )
+
+            if self._explicit_whatsapp_current_turn(
+                arguments,
+                user_message,
+            ):
+                return AuthorizationDecision(
+                    category,
+                    True,
+                    "explicit_current_turn",
+                    False,
+                )
+
+            return AuthorizationDecision(
+                category,
+                False,
+                "assistant_proposed",
+                False,
+            )
         category = self.classify(capability, arguments)
 
         if category is None:

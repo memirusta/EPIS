@@ -75,7 +75,18 @@ class DeviceArchitectureTests(unittest.TestCase):
         manifest = worker.handle({"version": 1, "operation": "describe"})["device"]
         self.assertTrue(manifest["device_id"])
         self.assertTrue(manifest["display_name"])
-        self.assertEqual(set(manifest["capabilities"]), build_local_registry().capabilities())
+        expected_capabilities = build_local_registry().capabilities()
+        # Hidden WhatsApp contracts exist in the registry so the cloud/device
+        # protocol can validate them, but a default worker must not advertise
+        # them until a real trusted local WhatsApp bridge is configured.
+        expected_capabilities.difference_update({
+            "whatsapp.outreach.send",
+            "whatsapp.outreach.accept_reply",
+        })
+        self.assertEqual(
+            set(manifest["capabilities"]),
+            expected_capabilities,
+        )
         self.assertNotIn("codex.send", manifest["capabilities"])
 
     def test_child_environment_excludes_keys_and_python_injection(self):
@@ -244,7 +255,7 @@ class DeviceArchitectureTests(unittest.TestCase):
 
     def test_new_registry_metadata(self):
         registry = build_local_registry()
-        self.assertEqual(len(registry.specs()), 63)
+        self.assertEqual(len(registry.specs()), 65)
         self.assertEqual(registry.get("open_url")[0].risk_class, "yellow")
         self.assertIn("system.battery", registry.capabilities("windows"))
         self.assertNotIn("phone.call", registry.capabilities("windows"))

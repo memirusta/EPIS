@@ -18,6 +18,9 @@ from fastapi.responses import JSONResponse
 from agentic.cli import create_core
 from agentic.cloud_transport import CloudDeviceTransport
 from agentic.devices import Device
+from agentic.whatsapp_outreach import (
+    WHATSAPP_DEVICE_REPLY_CAPABILITY,
+)
 from server.daily_transcript import build_daily_transcript_store, day_id_for
 
 
@@ -1293,6 +1296,305 @@ async def _whatsapp_turn(data: dict[str, Any]) -> dict[str, Any]:
         "confirmation_required": confirmation_required,
         "approval_id": approval_id,
     }
+
+
+def _validate_whatsapp_outreach_reply(
+    data: Any,
+) -> dict[str, Any]:
+    if not isinstance(
+        data,
+        dict,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_payload",
+        )
+
+    provider_message_ref = data.get(
+        "provider_message_ref"
+    )
+
+    provider_contact_ref = data.get(
+        "provider_contact_ref"
+    )
+
+    content = data.get(
+        "content"
+    )
+
+    confidence = data.get(
+        "confidence",
+        0.65,
+    )
+
+    if (
+        not isinstance(
+            provider_message_ref,
+            str,
+        )
+        or not provider_message_ref.strip()
+        or len(provider_message_ref) > 512
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=
+                "invalid_provider_message_ref",
+        )
+
+    if (
+        not isinstance(
+            provider_contact_ref,
+            str,
+        )
+        or not provider_contact_ref.strip()
+        or len(provider_contact_ref) > 512
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=
+                "invalid_provider_contact_ref",
+        )
+
+    if (
+        not isinstance(
+            content,
+            str,
+        )
+        or not content.strip()
+        or len(content) > 12000
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=
+                "invalid_reply_content",
+        )
+
+    if (
+        type(confidence)
+        not in (
+            int,
+            float,
+        )
+        or not 0 <= float(confidence) <= 1
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=
+                "invalid_confidence",
+        )
+
+    return {
+        "provider_message_ref":
+            provider_message_ref.strip(),
+
+        "provider_contact_ref":
+            provider_contact_ref.strip(),
+
+        "content":
+            content.strip(),
+
+        "confidence":
+            float(confidence),
+    }
+
+
+def _whatsapp_outreach_reply_transports(
+    core,
+) -> list[Any]:
+    candidates = []
+
+    for transport in list(
+        core.transports.values()
+    ):
+        # Never route private external-perspective ingestion
+        # to the cloud placeholder/in-process control plane.
+        if (
+            transport
+            is core.local_agent
+        ):
+            continue
+
+        try:
+            if not transport.refresh():
+                continue
+        except Exception:
+            continue
+
+        device = getattr(
+            transport,
+            "device",
+            None,
+        )
+
+        if (
+            device is not None
+            and device.online
+            and
+            WHATSAPP_DEVICE_REPLY_CAPABILITY
+            in device.capabilities
+        ):
+            candidates.append(
+                transport
+            )
+
+    return candidates
+
+
+async def _route_whatsapp_outreach_reply(
+    data: Any,
+) -> dict[str, Any]:
+    arguments = (
+        _validate_whatsapp_outreach_reply(
+            data
+        )
+    )
+
+    core = get_core()
+
+    candidates = (
+        _whatsapp_outreach_reply_transports(
+            core
+        )
+    )
+
+    if not candidates:
+        raise HTTPException(
+            status_code=503,
+            detail=
+                "whatsapp_reply_device_unavailable",
+        )
+
+    if len(candidates) != 1:
+        raise HTTPException(
+            status_code=409,
+            detail=
+                "whatsapp_reply_device_ambiguous",
+        )
+
+    # Deterministic command ID makes webhook retries safe even
+    # if the cloud temporarily loses the device response after
+    # local execution. DeviceWorker's receipt cache owns replay.
+    command_material = (
+        arguments[
+            "provider_message_ref"
+        ]
+        + "\0"
+        + arguments[
+            "provider_contact_ref"
+        ]
+        + "\0"
+        + arguments["content"]
+        + "\0"
+        + repr(
+            arguments["confidence"]
+        )
+    )
+
+    request_id = (
+        "wa-reply-"
+        + hashlib.sha256(
+            command_material.encode(
+                "utf-8"
+            )
+        ).hexdigest()[:40]
+    )
+
+    transport = candidates[0]
+
+    result = await asyncio.to_thread(
+        transport.execute,
+        WHATSAPP_DEVICE_REPLY_CAPABILITY,
+        arguments,
+        confirmed=True,
+        request_id=request_id,
+    )
+
+    if not isinstance(
+        result,
+        dict,
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail=
+                "invalid_whatsapp_device_response",
+        )
+
+    if result.get("ok") is not True:
+        # A deterministic request ID means a retry cannot silently
+        # create a second local side effect.
+        raise HTTPException(
+            status_code=503,
+            detail=str(
+                result.get(
+                    "error"
+                )
+                or
+                "whatsapp_reply_processing_failed"
+            )[:200],
+        )
+
+    status = str(
+        result.get("status")
+        or ""
+    )
+
+    safe = {
+        "ok": True,
+        "status": status,
+    }
+
+    # outreach_id is opaque and useful to the bridge for logging.
+    outreach_id = result.get(
+        "outreach_id"
+    )
+
+    if (
+        isinstance(
+            outreach_id,
+            str,
+        )
+        and outreach_id
+    ):
+        safe[
+            "outreach_id"
+        ] = outreach_id
+
+    # Deliberately do NOT echo:
+    # - provider_contact_ref
+    # - provider_message_ref
+    # - reply content
+    # - person_id
+    # - memory_id
+    return safe
+
+
+@app.post(
+    "/internal/whatsapp/outreach-reply"
+)
+async def whatsapp_outreach_reply(
+    request: Request,
+):
+    _require_internal_event(
+        request
+    )
+
+    try:
+        data = await request.json()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_json",
+        ) from exc
+
+    result = await (
+        _route_whatsapp_outreach_reply(
+            data
+        )
+    )
+
+    return JSONResponse(
+        result
+    )
 
 
 @app.post("/whatsapp/incoming")
