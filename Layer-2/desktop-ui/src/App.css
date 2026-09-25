@@ -1179,3 +1179,257 @@ button {
     display: none;
   }
 }
+
+
+/* Nightly Recalculation live activity */
+
+.nightly-panel {
+  padding-bottom: 90px;
+}
+
+.nightly-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.nightly-run-status,
+.nightly-event-status {
+  flex: 0 0 auto;
+  padding: 6px 9px;
+
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 999px;
+
+  background: rgba(255, 255, 255, .025);
+  color: #8b8e98;
+
+  font-size: 9px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.nightly-run-status.running,
+.nightly-event-status.started {
+  border-color: rgba(213, 170, 85, .2);
+  color: #d5aa55;
+}
+
+.nightly-run-status.success,
+.nightly-event-status.ok,
+.nightly-event-status.committed,
+.nightly-event-status.acked {
+  border-color: rgba(114, 219, 160, .2);
+  color: #72dba0;
+}
+
+.nightly-run-status.partial,
+.nightly-event-status.pending,
+.nightly-event-status.warn {
+  border-color: rgba(213, 170, 85, .2);
+  color: #d5aa55;
+}
+
+.nightly-run-status.failed,
+.nightly-event-status.failed,
+.nightly-event-status.error {
+  border-color: rgba(223, 127, 127, .22);
+  color: #df7f7f;
+}
+
+.nightly-run-meta {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr .7fr;
+  gap: 10px;
+
+  margin-top: 28px;
+}
+
+.nightly-run-meta > div {
+  padding: 13px 14px;
+
+  border: 1px solid rgba(255, 255, 255, .07);
+  border-radius: 12px;
+
+  background: rgba(255, 255, 255, .025);
+}
+
+.nightly-run-meta span,
+.nightly-run-meta strong {
+  display: block;
+}
+
+.nightly-run-meta span {
+  margin-bottom: 5px;
+
+  color: #666974;
+
+  font-size: 8px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.nightly-run-meta strong {
+  color: #d9d9de;
+
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.nightly-timeline {
+  margin-top: 22px;
+}
+
+.nightly-event {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+
+  min-height: 82px;
+}
+
+.nightly-event-rail {
+  position: relative;
+
+  display: flex;
+  justify-content: center;
+}
+
+.nightly-event-dot {
+  position: relative;
+  z-index: 1;
+
+  width: 8px;
+  height: 8px;
+
+  margin-top: 18px;
+
+  border: 2px solid #15161c;
+  border-radius: 50%;
+
+  background: #777a85;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, .08);
+}
+
+.nightly-event.ok .nightly-event-dot,
+.nightly-event.committed .nightly-event-dot,
+.nightly-event.acked .nightly-event-dot {
+  background: #58d991;
+}
+
+.nightly-event.started .nightly-event-dot,
+.nightly-event.pending .nightly-event-dot,
+.nightly-event.warn .nightly-event-dot {
+  background: #d5aa55;
+}
+
+.nightly-event.failed .nightly-event-dot,
+.nightly-event.error .nightly-event-dot {
+  background: #df6666;
+}
+
+.nightly-event-line {
+  position: absolute;
+
+  top: 26px;
+  bottom: -2px;
+
+  width: 1px;
+
+  background: rgba(255, 255, 255, .07);
+}
+
+.nightly-event:last-child
+.nightly-event-line {
+  display: none;
+}
+
+.nightly-event-body {
+  margin-bottom: 10px;
+  padding: 14px 15px;
+
+  border: 1px solid rgba(255, 255, 255, .07);
+  border-radius: 12px;
+
+  background: rgba(255, 255, 255, .022);
+}
+
+.nightly-event-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.nightly-event-heading strong,
+.nightly-event-stage {
+  display: block;
+}
+
+.nightly-event-stage {
+  margin-bottom: 4px;
+
+  color: #7565f6;
+
+  font-size: 8px;
+  font-weight: 750;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+
+.nightly-event-heading strong {
+  color: #dedee2;
+
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.nightly-event-body p {
+  max-width: none;
+  margin: 8px 0 0;
+
+  color: #737680;
+
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.nightly-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+
+  margin-top: 11px;
+}
+
+.nightly-metrics > span {
+  min-width: 76px;
+  padding: 7px 9px;
+
+  border: 1px solid rgba(255, 255, 255, .055);
+  border-radius: 9px;
+
+  background: rgba(255, 255, 255, .02);
+}
+
+.nightly-metrics small,
+.nightly-metrics strong {
+  display: block;
+}
+
+.nightly-metrics small {
+  margin-bottom: 3px;
+
+  color: #5f626d;
+
+  font-size: 7px;
+  text-transform: uppercase;
+}
+
+.nightly-metrics strong {
+  color: #bbbcc3;
+
+  font-size: 9px;
+  font-weight: 600;
+}

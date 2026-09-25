@@ -21,7 +21,7 @@ from agentic.devices import Device
 from server.daily_transcript import build_daily_transcript_store, day_id_for
 
 
-SERVER_VERSION = "0.10.0"
+SERVER_VERSION = "0.11.0"
 DEPLOYMENT_MODE = os.getenv("EPIS_DEPLOYMENT", "local").strip().lower()
 SERVER_TOKEN = os.getenv("EPIS_SERVER_TOKEN", "").strip()
 WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "").strip()
@@ -695,6 +695,305 @@ def _require_internal_event(request: Request) -> None:
 
 _NC_INFERENCE_STAGES = {"summary", "analysis", "voice"}
 _NC_INFERENCE_MAX_PROMPT_CHARS = 60_000
+
+_NC_TRACE_EVENTS = {
+    "run.started",
+    "stage.started",
+    "stage.completed",
+    "memory.summary",
+    "vault.committed",
+    "cloud.acked",
+    "run.completed",
+    "run.failed",
+}
+_NC_TRACE_STAGES = {
+    "transcript",
+    "collection",
+    "privacy",
+    "summary",
+    "analysis",
+    "voice",
+    "memory",
+    "drift",
+    "sync",
+    "cloud",
+}
+_NC_TRACE_STATUSES = {
+    "started",
+    "ok",
+    "skip",
+    "warn",
+    "error",
+    "pending",
+    "committed",
+    "acked",
+    "partial",
+    "success",
+    "failed",
+}
+_NC_TRACE_MAX_EVENTS = 64
+_NC_TRACE_MAX_RUNS = 4
+_NC_TRACE_MAX_DETAIL_CHARS = 240
+
+_nc_trace_runs: dict[str, dict[str, Any]] = {}
+_nc_trace_order: list[str] = []
+_nc_trace_lock = asyncio.Lock()
+
+
+def _bounded_nc_trace_text(value: Any, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text[:limit]
+
+
+def _nc_trace_metrics(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+
+    if not isinstance(value, dict) or len(value) > 12:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_nc_trace_metrics",
+        )
+
+    result: dict[str, Any] = {}
+
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).strip()
+
+        if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,40}", key):
+            raise HTTPException(
+                status_code=400,
+                detail="invalid_nc_trace_metric_key",
+            )
+
+        if isinstance(raw_value, bool):
+            result[key] = raw_value
+
+        elif isinstance(raw_value, (int, float)) and not isinstance(
+            raw_value,
+            bool,
+        ):
+            result[key] = raw_value
+
+        elif isinstance(raw_value, str):
+            result[key] = raw_value[:80]
+
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="invalid_nc_trace_metric_value",
+            )
+
+    return result
+
+
+def _normalize_nc_trace(data: Any) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_payload",
+        )
+
+    run_id = _valid_id(data.get("run_id"))
+    day_id = str(data.get("day_id") or "").strip()
+    event = str(data.get("event") or "").strip().lower()
+
+    if run_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_nc_trace_run_id",
+        )
+
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day_id):
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_nc_trace_day_id",
+        )
+
+    try:
+        seq = int(data.get("seq"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_nc_trace_seq",
+        ) from exc
+
+    if seq < 1 or seq > 1000:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_nc_trace_seq",
+        )
+
+    if event not in _NC_TRACE_EVENTS:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_nc_trace_event",
+        )
+
+    stage_raw = data.get("stage")
+    stage = (
+        None
+        if stage_raw is None
+        else str(stage_raw).strip().lower()
+    )
+
+    if stage is not None and stage not in _NC_TRACE_STAGES:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_nc_trace_stage",
+        )
+
+    status_raw = data.get("status")
+    status = (
+        None
+        if status_raw is None
+        else str(status_raw).strip().lower()
+    )
+
+    if status is not None and status not in _NC_TRACE_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_nc_trace_status",
+        )
+
+    return {
+        "type": "nc.trace",
+        "run_id": run_id,
+        "day_id": day_id,
+        "seq": seq,
+        "event": event,
+        "stage": stage,
+        "status": status,
+        "title": _bounded_nc_trace_text(
+            data.get("title"),
+            80,
+        ),
+        "detail": _bounded_nc_trace_text(
+            data.get("detail"),
+            _NC_TRACE_MAX_DETAIL_CHARS,
+        ),
+        "metrics": _nc_trace_metrics(
+            data.get("metrics")
+        ),
+        "time": utc_now(),
+    }
+
+
+async def _record_nc_trace_event(
+    payload: dict[str, Any],
+) -> bool:
+    run_id = str(payload["run_id"])
+    seq = int(payload["seq"])
+
+    async with _nc_trace_lock:
+        run = _nc_trace_runs.get(run_id)
+
+        if run is None:
+            run = {
+                "run_id": run_id,
+                "day_id": payload["day_id"],
+                "status": "running",
+                "events": {},
+                "updated_at": payload["time"],
+            }
+
+            _nc_trace_runs[run_id] = run
+            _nc_trace_order.append(run_id)
+
+            while len(_nc_trace_order) > _NC_TRACE_MAX_RUNS:
+                old = _nc_trace_order.pop(0)
+                _nc_trace_runs.pop(old, None)
+
+        events: dict[int, dict[str, Any]] = run["events"]
+
+        # Idempotent event retry.
+        if seq in events:
+            return False
+
+        events[seq] = dict(payload)
+
+        while len(events) > _NC_TRACE_MAX_EVENTS:
+            oldest_seq = min(events)
+            events.pop(oldest_seq, None)
+
+        run["day_id"] = payload["day_id"]
+        run["updated_at"] = payload["time"]
+
+        if payload["event"] == "run.started":
+            run["status"] = "running"
+
+        elif payload["event"] == "run.failed":
+            run["status"] = "failed"
+
+        elif payload["event"] == "run.completed":
+            run["status"] = (
+                payload.get("status")
+                or "success"
+            )
+
+        return True
+
+
+async def _latest_nc_trace_snapshot() -> dict[str, Any] | None:
+    async with _nc_trace_lock:
+        if not _nc_trace_order:
+            return None
+
+        run_id = _nc_trace_order[-1]
+        run = _nc_trace_runs.get(run_id)
+
+        if run is None:
+            return None
+
+        events = [
+            dict(run["events"][seq])
+            for seq in sorted(run["events"])
+        ]
+
+        return {
+            "type": "nc.trace.snapshot",
+            "run_id": run["run_id"],
+            "day_id": run["day_id"],
+            "status": run["status"],
+            "events": events,
+            "updated_at": run["updated_at"],
+            "time": utc_now(),
+        }
+
+
+@app.post("/internal/nc/trace")
+async def nc_trace(request: Request):
+    """Publish one sanitized NC activity event to connected UIs."""
+    _require_internal_event(request)
+
+    try:
+        data = await request.json()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_json",
+        ) from exc
+
+    payload = _normalize_nc_trace(data)
+
+    accepted = await _record_nc_trace_event(
+        payload
+    )
+
+    if accepted:
+        await _broadcast_clients(payload)
+
+    return {
+        "ok": True,
+        "accepted": accepted,
+        "run_id": payload["run_id"],
+        "seq": payload["seq"],
+        "time": utc_now(),
+    }
 
 
 @app.post("/internal/nc/infer")
@@ -1434,6 +1733,17 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         "time": utc_now(),
                     },
                 )
+
+                trace_snapshot = (
+                    await _latest_nc_trace_snapshot()
+                )
+
+                if trace_snapshot is not None:
+                    await _send_to_client(
+                        client_id,
+                        trace_snapshot,
+                    )
+
                 continue
 
             # Protocol-v1 compatibility for the existing read-only usage

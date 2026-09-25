@@ -21,6 +21,29 @@ type Message = {
 type ConnectionState = "connecting" | "online" | "offline";
 type AgentConnectionState = "connecting" | "online" | "offline";
 
+type NcTraceMetric = string | number | boolean;
+
+type NcTraceEvent = {
+  runId: string;
+  dayId: string;
+  seq: number;
+  event: string;
+  stage?: string;
+  status?: string;
+  title?: string;
+  detail?: string;
+  metrics: Record<string, NcTraceMetric>;
+  time?: string;
+};
+
+type NcTraceRun = {
+  runId: string;
+  dayId: string;
+  status: string;
+  events: NcTraceEvent[];
+  updatedAt?: string;
+};
+
 type ApprovalRequest = {
   id: string;
   message: string;
@@ -367,6 +390,211 @@ function asDeviceSnapshots(value: unknown): DeviceSnapshot[] | null {
   return devices;
 }
 
+function asNcTraceEvent(value: unknown): NcTraceEvent | null {
+  const item = asObject(value);
+
+  if (item === null) return null;
+
+  if (
+    typeof item.run_id !== "string" ||
+    typeof item.day_id !== "string" ||
+    typeof item.seq !== "number" ||
+    typeof item.event !== "string"
+  ) {
+    return null;
+  }
+
+  const metrics: Record<string, NcTraceMetric> = {};
+  const rawMetrics = asObject(item.metrics);
+
+  if (rawMetrics !== null) {
+    for (const [key, raw] of Object.entries(rawMetrics)) {
+      if (
+        typeof raw === "string" ||
+        typeof raw === "number" ||
+        typeof raw === "boolean"
+      ) {
+        metrics[key] = raw;
+      }
+    }
+  }
+
+  return {
+    runId: item.run_id,
+    dayId: item.day_id,
+    seq: item.seq,
+    event: item.event,
+    stage:
+      typeof item.stage === "string"
+        ? item.stage
+        : undefined,
+    status:
+      typeof item.status === "string"
+        ? item.status
+        : undefined,
+    title:
+      typeof item.title === "string"
+        ? item.title
+        : undefined,
+    detail:
+      typeof item.detail === "string"
+        ? item.detail
+        : undefined,
+    metrics,
+    time:
+      typeof item.time === "string"
+        ? item.time
+        : undefined,
+  };
+}
+
+function traceRunStatus(
+  event: NcTraceEvent,
+  current: string,
+): string {
+  if (event.event === "run.failed") {
+    return "failed";
+  }
+
+  if (event.event === "run.completed") {
+    return event.status ?? "success";
+  }
+
+  if (event.event === "run.started") {
+    return "running";
+  }
+
+  return current;
+}
+
+function mergeNcTraceEvent(
+  current: NcTraceRun | null,
+  event: NcTraceEvent,
+): NcTraceRun {
+  const base: NcTraceRun =
+    current !== null &&
+    current.runId === event.runId
+      ? current
+      : {
+          runId: event.runId,
+          dayId: event.dayId,
+          status: "running",
+          events: [],
+        };
+
+  const bySeq = new Map(
+    base.events.map((item) => [
+      item.seq,
+      item,
+    ]),
+  );
+
+  bySeq.set(event.seq, event);
+
+  return {
+    ...base,
+    dayId: event.dayId,
+    status: traceRunStatus(
+      event,
+      base.status,
+    ),
+    events: [...bySeq.values()].sort(
+      (left, right) =>
+        left.seq - right.seq,
+    ),
+    updatedAt:
+      event.time ?? base.updatedAt,
+  };
+}
+
+function asNcTraceSnapshot(
+  value: unknown,
+): NcTraceRun | null {
+  const item = asObject(value);
+
+  if (
+    item === null ||
+    typeof item.run_id !== "string" ||
+    typeof item.day_id !== "string" ||
+    !Array.isArray(item.events)
+  ) {
+    return null;
+  }
+
+  const events = item.events
+    .map(asNcTraceEvent)
+    .filter(
+      (event): event is NcTraceEvent =>
+        event !== null,
+    )
+    .sort(
+      (left, right) =>
+        left.seq - right.seq,
+    );
+
+  return {
+    runId: item.run_id,
+    dayId: item.day_id,
+    status:
+      typeof item.status === "string"
+        ? item.status
+        : "running",
+    events,
+    updatedAt:
+      typeof item.updated_at === "string"
+        ? item.updated_at
+        : undefined,
+  };
+}
+
+function traceStatusLabel(
+  status: string,
+): string {
+  switch (status) {
+    case "running":
+      return "Running";
+
+    case "success":
+      return "Complete";
+
+    case "partial":
+      return "Partial";
+
+    case "failed":
+      return "Failed";
+
+    case "committed":
+      return "Committed";
+
+    case "acked":
+      return "Acked";
+
+    case "pending":
+      return "Pending";
+
+    case "ok":
+      return "OK";
+
+    case "skip":
+      return "Skipped";
+
+    case "warn":
+      return "Warning";
+
+    case "error":
+      return "Error";
+
+    default:
+      return status || "Event";
+  }
+}
+
+function traceMetricLabel(
+  key: string,
+): string {
+  return key.replace(/_/g, " ");
+}
+
 function formatNumber(value: number | null | undefined): string {
   return typeof value === "number"
     ? new Intl.NumberFormat("tr-TR").format(value)
@@ -461,6 +689,7 @@ export default function App() {
   const [startupState, setStartupState] = useState<StartupState | null>(null);
   const [startupSaving, setStartupSaving] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [ncTrace, setNcTrace] = useState<NcTraceRun | null>(null);
 
   const [error, setError] = useState<string | null>(null);
 
@@ -608,6 +837,33 @@ export default function App() {
               type: "conversation.sync",
               request_id: nextProtocolId("sync"),
             }));
+            return;
+          }
+
+          if (data.type === "nc.trace.snapshot") {
+            const snapshot =
+              asNcTraceSnapshot(data);
+
+            if (snapshot !== null) {
+              setNcTrace(snapshot);
+            }
+
+            return;
+          }
+
+          if (data.type === "nc.trace") {
+            const traceEvent =
+              asNcTraceEvent(data);
+
+            if (traceEvent !== null) {
+              setNcTrace((current) =>
+                mergeNcTraceEvent(
+                  current,
+                  traceEvent,
+                ),
+              );
+            }
+
             return;
           }
 
@@ -1103,7 +1359,7 @@ export default function App() {
             className={page === "memory" ? "active" : ""}
             onClick={() => setPage("memory")}
           >
-            Memory
+            Nightly
           </button>
 
           <button
@@ -1586,11 +1842,140 @@ export default function App() {
         </main>
       ) : (
         <main className="panel-page">
-          <section className="panel">
-            <div className="panel-kicker">MEMORY</div>
-            <h1>Memory</h1>
-            <p>{"Sohbet ge\u00e7mi\u015fi de\u011fil; EPIS'in kal\u0131c\u0131 memory ve identity katman\u0131 burada g\u00f6r\u00fcnecek."}</p>
-            <div className="not-connected-yet">{"Kalıcı memory görünümü henüz bu panele bağlanmadı; sohbet ve agent runtime bundan bağımsız çalışıyor."}</div>
+          <section className="panel nightly-panel">
+            <div className="panel-kicker">
+              MEMORY · NIGHTLY · LIVE
+            </div>
+
+            <div className="nightly-heading">
+              <div>
+                <h1>Nightly Activity</h1>
+                <p>
+                  NC'nin gözlemlenebilir çalışma izi.
+                  Raw transcript, prompt ve chain-of-thought
+                  bu akışa çıkmaz.
+                </p>
+              </div>
+
+              {ncTrace !== null && (
+                <span
+                  className={`nightly-run-status ${ncTrace.status}`}
+                >
+                  {traceStatusLabel(
+                    ncTrace.status,
+                  )}
+                </span>
+              )}
+            </div>
+
+            {ncTrace === null ? (
+              <div className="not-connected-yet">
+                Henüz bir Nightly Recalculation izi alınmadı.
+                Sonraki NC başladığında bu ekran canlı güncellenecek.
+              </div>
+            ) : (
+              <>
+                <div className="nightly-run-meta">
+                  <div>
+                    <span>Run</span>
+                    <strong>
+                      {ncTrace.runId}
+                    </strong>
+                  </div>
+
+                  <div>
+                    <span>Day</span>
+                    <strong>
+                      {ncTrace.dayId}
+                    </strong>
+                  </div>
+
+                  <div>
+                    <span>Events</span>
+                    <strong>
+                      {ncTrace.events.length}
+                    </strong>
+                  </div>
+                </div>
+
+                <div className="nightly-timeline">
+                  {ncTrace.events.map(
+                    (item) => (
+                      <article
+                        className={`nightly-event ${item.status ?? ""}`}
+                        key={`${item.runId}:${item.seq}`}
+                      >
+                        <div className="nightly-event-rail">
+                          <span className="nightly-event-dot" />
+                          <span className="nightly-event-line" />
+                        </div>
+
+                        <div className="nightly-event-body">
+                          <div className="nightly-event-heading">
+                            <div>
+                              <span className="nightly-event-stage">
+                                {item.stage ??
+                                  item.event}
+                              </span>
+
+                              <strong>
+                                {item.title ??
+                                  item.event}
+                              </strong>
+                            </div>
+
+                            <span
+                              className={`nightly-event-status ${item.status ?? ""}`}
+                            >
+                              {traceStatusLabel(
+                                item.status ?? "",
+                              )}
+                            </span>
+                          </div>
+
+                          {item.detail && (
+                            <p>
+                              {item.detail}
+                            </p>
+                          )}
+
+                          {Object.keys(
+                            item.metrics,
+                          ).length > 0 && (
+                            <div className="nightly-metrics">
+                              {Object.entries(
+                                item.metrics,
+                              ).map(
+                                ([
+                                  key,
+                                  value,
+                                ]) => (
+                                  <span
+                                    key={key}
+                                  >
+                                    <small>
+                                      {traceMetricLabel(
+                                        key,
+                                      )}
+                                    </small>
+
+                                    <strong>
+                                      {String(
+                                        value,
+                                      )}
+                                    </strong>
+                                  </span>
+                                ),
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </article>
+                    ),
+                  )}
+                </div>
+              </>
+            )}
           </section>
         </main>
       )}

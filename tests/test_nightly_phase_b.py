@@ -29,6 +29,14 @@ class FakeTranscriptClient:
         self.ack_fails = ack_fails
         self.freeze_calls = 0
         self.acks = []
+        self.traces = []
+
+    def emit_trace(self, **payload):
+        self.traces.append(dict(payload))
+        return {
+            "ok": True,
+            "accepted": True,
+        }
 
     def freeze(self, **kwargs):
         self.freeze_calls += 1
@@ -226,6 +234,68 @@ class NightlyPhaseBTests(unittest.TestCase):
         self.assertEqual(seen, ["2026-09-20"])
         self.assertEqual(report["processed_days"], [])
 
+
+    def test_live_trace_is_bounded_and_never_contains_model_content(self):
+        client = FakeTranscriptClient(
+            self.frozen
+        )
+
+        engine = self._engine(client)
+        report = engine.run()
+
+        self.assertEqual(
+            report["status"],
+            "success",
+        )
+        self.assertTrue(client.traces)
+
+        events = [
+            item["event"]
+            for item in client.traces
+        ]
+
+        self.assertEqual(
+            events[0],
+            "run.started",
+        )
+        self.assertIn(
+            "memory.summary",
+            events,
+        )
+        self.assertIn(
+            "vault.committed",
+            events,
+        )
+        self.assertIn(
+            "cloud.acked",
+            events,
+        )
+        self.assertEqual(
+            events[-1],
+            "run.completed",
+        )
+
+        serialized = json.dumps(
+            client.traces,
+            ensure_ascii=False,
+        )
+
+        self.assertNotIn(
+            "Günün özeti yeterince uzun",
+            serialized,
+        )
+        self.assertNotIn(
+            "Teknik projede ilerleme var",
+            serialized,
+        )
+        self.assertNotIn(
+            "İyi ilerleme var.",
+            serialized,
+        )
+        self.assertNotIn(
+            "input_hash",
+            serialized,
+        )
 
     def test_stage3_accepts_plain_text_luna_response_in_one_turn(self):
         class VoiceClient:

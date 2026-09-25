@@ -44,17 +44,17 @@ class ChatAttachment {
   final String dataBase64;
 
   ChatAttachmentSummary get summary => ChatAttachmentSummary(
-        name: name,
-        mimeType: mimeType,
-        sizeBytes: sizeBytes,
-      );
+    name: name,
+    mimeType: mimeType,
+    sizeBytes: sizeBytes,
+  );
 
   Map<String, dynamic> toWire() => {
-        'name': name,
-        'mime_type': mimeType,
-        'size_bytes': sizeBytes,
-        'data_base64': dataBase64,
-      };
+    'name': name,
+    'mime_type': mimeType,
+    'size_bytes': sizeBytes,
+    'data_base64': dataBase64,
+  };
 
   static ChatAttachment? tryParseNative(Map<String, dynamic> map) {
     final name = map['name'];
@@ -113,18 +113,17 @@ class ChatMessage {
     int? seq,
     String? createdAt,
     String? dayId,
-  }) =>
-      ChatMessage(
-        role: role ?? this.role,
-        text: text ?? this.text,
-        toolResults: toolResults ?? this.toolResults,
-        attachments: attachments ?? this.attachments,
-        messageId: messageId ?? this.messageId,
-        requestId: requestId ?? this.requestId,
-        seq: seq ?? this.seq,
-        createdAt: createdAt ?? this.createdAt,
-        dayId: dayId ?? this.dayId,
-      );
+  }) => ChatMessage(
+    role: role ?? this.role,
+    text: text ?? this.text,
+    toolResults: toolResults ?? this.toolResults,
+    attachments: attachments ?? this.attachments,
+    messageId: messageId ?? this.messageId,
+    requestId: requestId ?? this.requestId,
+    seq: seq ?? this.seq,
+    createdAt: createdAt ?? this.createdAt,
+    dayId: dayId ?? this.dayId,
+  );
 }
 
 class ApprovalRequest {
@@ -205,6 +204,139 @@ class DeviceSnapshot {
       platform: map['platform'] as String,
       capabilities: caps.whereType<String>().toList(growable: false),
       online: map['online'] as bool,
+    );
+  }
+}
+
+class NcTraceEvent {
+  const NcTraceEvent({
+    required this.runId,
+    required this.dayId,
+    required this.seq,
+    required this.event,
+    required this.metrics,
+    this.stage,
+    this.status,
+    this.title,
+    this.detail,
+    this.time,
+  });
+
+  final String runId;
+  final String dayId;
+  final int seq;
+  final String event;
+  final String? stage;
+  final String? status;
+  final String? title;
+  final String? detail;
+  final Map<String, Object> metrics;
+  final String? time;
+
+  static NcTraceEvent? tryParse(Object? value) {
+    if (value is! Map) return null;
+
+    final map = Map<String, dynamic>.from(value);
+
+    final seq = map['seq'];
+
+    if (map['run_id'] is! String ||
+        map['day_id'] is! String ||
+        seq is! num ||
+        map['event'] is! String) {
+      return null;
+    }
+
+    final metrics = <String, Object>{};
+
+    final rawMetrics = map['metrics'];
+
+    if (rawMetrics is Map) {
+      for (final entry in rawMetrics.entries) {
+        final key = entry.key.toString();
+
+        final raw = entry.value;
+
+        if (raw is String || raw is num || raw is bool) {
+          metrics[key] = raw as Object;
+        }
+      }
+    }
+
+    return NcTraceEvent(
+      runId: map['run_id'] as String,
+      dayId: map['day_id'] as String,
+      seq: seq.toInt(),
+      event: map['event'] as String,
+      stage: map['stage'] is String ? map['stage'] as String : null,
+      status: map['status'] is String ? map['status'] as String : null,
+      title: map['title'] is String ? map['title'] as String : null,
+      detail: map['detail'] is String ? map['detail'] as String : null,
+      metrics: metrics,
+      time: map['time'] is String ? map['time'] as String : null,
+    );
+  }
+}
+
+class NcTraceRun {
+  const NcTraceRun({
+    required this.runId,
+    required this.dayId,
+    required this.status,
+    required this.events,
+    this.updatedAt,
+  });
+
+  final String runId;
+  final String dayId;
+  final String status;
+  final List<NcTraceEvent> events;
+  final String? updatedAt;
+
+  NcTraceRun copyWith({
+    String? runId,
+    String? dayId,
+    String? status,
+    List<NcTraceEvent>? events,
+    String? updatedAt,
+  }) => NcTraceRun(
+    runId: runId ?? this.runId,
+    dayId: dayId ?? this.dayId,
+    status: status ?? this.status,
+    events: events ?? this.events,
+    updatedAt: updatedAt ?? this.updatedAt,
+  );
+
+  static NcTraceRun? tryParseSnapshot(Object? value) {
+    if (value is! Map) {
+      return null;
+    }
+
+    final map = Map<String, dynamic>.from(value);
+
+    final rawEvents = map['events'];
+
+    if (map['run_id'] is! String ||
+        map['day_id'] is! String ||
+        rawEvents is! List) {
+      return null;
+    }
+
+    final events =
+        rawEvents
+            .map(NcTraceEvent.tryParse)
+            .whereType<NcTraceEvent>()
+            .toList(growable: false)
+          ..sort((left, right) => left.seq.compareTo(right.seq));
+
+    return NcTraceRun(
+      runId: map['run_id'] as String,
+      dayId: map['day_id'] as String,
+      status: map['status'] is String ? map['status'] as String : 'running',
+      events: events,
+      updatedAt: map['updated_at'] is String
+          ? map['updated_at'] as String
+          : null,
     );
   }
 }

@@ -4,6 +4,7 @@ import 'controller.dart';
 import 'models.dart';
 import 'screens/chat_screen.dart';
 import 'screens/devices_screen.dart';
+import 'screens/nightly_screen.dart';
 import 'screens/settings_screen.dart';
 
 class EpisApp extends StatefulWidget {
@@ -55,6 +56,7 @@ class _EpisAppState extends State<EpisApp> {
 
           final pages = <Widget>[
             ChatScreen(controller: c),
+            NightlyScreen(controller: c),
             DevicesScreen(controller: c),
             SettingsScreen(controller: c),
           ];
@@ -101,13 +103,18 @@ class _EpisAppState extends State<EpisApp> {
               selectedIndex: _index,
               onDestinationSelected: (value) {
                 setState(() => _index = value);
-                if (value == 1) c.refreshDevices();
+                if (value == 2) c.refreshDevices();
               },
               destinations: const [
                 NavigationDestination(
                   icon: Icon(Icons.chat_bubble_outline),
                   selectedIcon: Icon(Icons.chat_bubble),
                   label: 'Chat',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.auto_awesome_outlined),
+                  selectedIcon: Icon(Icons.auto_awesome),
+                  label: 'Nightly',
                 ),
                 NavigationDestination(
                   icon: Icon(Icons.devices_outlined),

@@ -138,6 +138,8 @@ class NightlyRecalculation:
         self.vault = vault or LocalMemoryVault(cipher=self.cipher)
         self.frozen_transcript: dict = {}
         self._safe_memory_evidence = ""
+        self._trace_seq = 0
+        self._trace_warning_logged = False
 
         self.report = {
             "date":              self.today.isoformat(),
@@ -158,6 +160,42 @@ class NightlyRecalculation:
         if self.transcript_client is None:
             self.transcript_client = CloudTranscriptClient()
         return self.transcript_client
+
+    def _emit_trace(
+        self,
+        event: str,
+        *,
+        stage: str | None = None,
+        status: str | None = None,
+        title: str | None = None,
+        detail: str | None = None,
+        metrics: dict | None = None,
+    ) -> bool:
+        """Best-effort observable NC trace; never controls NC correctness."""
+        self._trace_seq += 1
+
+        try:
+            self._get_transcript_client().emit_trace(
+                run_id=self.run_id,
+                day_id=self.report["date"],
+                seq=self._trace_seq,
+                event=event,
+                stage=stage,
+                status=status,
+                title=title,
+                detail=detail,
+                metrics=metrics or {},
+            )
+            return True
+
+        except Exception as exc:
+            if not self._trace_warning_logged:
+                logger.warning(
+                    f"NC live trace kullanilamiyor: {exc}"
+                )
+                self._trace_warning_logged = True
+
+            return False
 
     def _freeze_canonical_day(self) -> dict | None:
         client = self._get_transcript_client()
@@ -214,26 +252,151 @@ class NightlyRecalculation:
 
             day_id = str(frozen["day_id"])
             input_hash = str(frozen["input_hash"])
+            message_count = len(
+                frozen.get("messages") or []
+            )
+
             self.report["stages"]["daily_transcript"] = "FROZEN"
+
+            self._emit_trace(
+                "run.started",
+                stage="transcript",
+                status="started",
+                title="Nightly Recalculation",
+                detail=(
+                    f"{message_count} mesajlik gunluk "
+                    "transcript kilitlendi."
+                ),
+                metrics={
+                    "message_count": message_count,
+                },
+            )
+
+            self._emit_trace(
+                "stage.completed",
+                stage="transcript",
+                status="ok",
+                title="Gunluk transcript",
+                detail="Immutable day receipt hazir.",
+                metrics={
+                    "message_count": message_count,
+                },
+            )
 
             # Crash-safe retry: local DB commit already succeeded, but the cloud
             # ACK/purge may have failed last time. Do not call any model again.
             if self.vault.is_run_committed(day_id, input_hash):
                 self.report["stages"]["memory_vault"] = "ALREADY_COMMITTED"
+
+                self._emit_trace(
+                    "vault.committed",
+                    stage="memory",
+                    status="committed",
+                    title="Memory Vault",
+                    detail=(
+                        "Bu receipt daha once yerelde commit "
+                        "edildi; model tekrar calistirilmiyor."
+                    ),
+                )
+
+                self._emit_trace(
+                    "stage.started",
+                    stage="cloud",
+                    status="started",
+                    title="Cloud receipt",
+                    detail=(
+                        "Onceki commit icin ACK yeniden "
+                        "deneniyor."
+                    ),
+                )
+
                 try:
-                    self._finish_cloud_transcript(day_id, input_hash)
+                    result = self._finish_cloud_transcript(
+                        day_id,
+                        input_hash,
+                    )
+
+                    purged = int(
+                        result.get("purged") or 0
+                    )
+
                     self.report["status"] = "success"
-                    self.report["highlights"].append("Onceki yerel NC commit'i cloud transcript ile uzlastirildi.")
+                    self.report["highlights"].append(
+                        "Onceki yerel NC commit'i cloud "
+                        "transcript ile uzlastirildi."
+                    )
+
+                    self._emit_trace(
+                        "cloud.acked",
+                        stage="cloud",
+                        status="acked",
+                        title="Cloud transcript",
+                        detail="Exact receipt ACK edildi.",
+                        metrics={
+                            "purged": purged,
+                        },
+                    )
+
                 except Exception as ack_exc:
                     self.report["status"] = "partial"
-                    self.report["stages"]["cloud_transcript_ack"] = "PENDING_RETRY"
-                    self.report["errors"].append(str(ack_exc))
+                    self.report["stages"][
+                        "cloud_transcript_ack"
+                    ] = "PENDING_RETRY"
+                    self.report["errors"].append(
+                        str(ack_exc)
+                    )
+
+                    self._emit_trace(
+                        "stage.completed",
+                        stage="cloud",
+                        status="pending",
+                        title="Cloud transcript",
+                        detail=(
+                            "ACK beklemede; raw transcript "
+                            "korunuyor."
+                        ),
+                    )
+
+                self._emit_trace(
+                    "run.completed",
+                    status=self.report["status"],
+                    title="Nightly Recalculation",
+                    detail="Retry lifecycle tamamlandi.",
+                )
+
                 return self._finalize()
 
             self.vault.note_run_started(day_id, input_hash, self.run_id)
 
-            raw_data = self._collect_daily_data(sensor_data=sensor_data)
+            self._emit_trace(
+                "stage.started",
+                stage="collection",
+                status="started",
+                title="Gunluk veri",
+                detail=(
+                    "Yerel ve canonical gunluk sinyaller "
+                    "toplaniyor."
+                ),
+            )
+
+            raw_data = self._collect_daily_data(
+                sensor_data=sensor_data
+            )
+
             self.report["stages"]["data_collection"] = "OK"
+
+            self._emit_trace(
+                "stage.completed",
+                stage="collection",
+                status="ok",
+                title="Gunluk veri",
+                detail="Veri toplama tamamlandi.",
+                metrics={
+                    "interaction_count": len(
+                        raw_data.get("interactions") or []
+                    ),
+                },
+            )
 
             if not raw_data.get("has_data"):
                 logger.warning("Yeterli gunluk veri yok.")
@@ -242,8 +405,35 @@ class NightlyRecalculation:
                 self.vault.note_run_failed(day_id, input_hash, "no_daily_data")
                 return self._finalize()
 
+            self._emit_trace(
+                "stage.started",
+                stage="privacy",
+                status="started",
+                title="Privacy pass",
+                detail=(
+                    "Cloud inference oncesi veri "
+                    "pseudonymize ediliyor."
+                ),
+            )
+
             safe_data = self._apply_privacy(raw_data)
             self.report["stages"]["privacy_layer"] = "OK"
+
+            self._emit_trace(
+                "stage.completed",
+                stage="privacy",
+                status="ok",
+                title="Privacy pass",
+                detail=(
+                    "Cloud'a yalniz privacy-filtered "
+                    "context gidecek."
+                ),
+                metrics={
+                    "pseudonym_count": len(
+                        self._pseudonym_map
+                    ),
+                },
+            )
             evidence_lines = []
             for item in safe_data.get("interactions", [])[:120]:
                 if item.get("event_type") != "daily_transcript":
@@ -256,24 +446,150 @@ class NightlyRecalculation:
                 evidence_lines.append(f"[{message_id}] {role}: {body[:800]}")
             self._safe_memory_evidence = "\n".join(evidence_lines)[:18000]
 
-            summary, s1_log = self._stage1_summarize(safe_data)
-            self.report["stages"]["stage1_summary"]     = f"OK ({s1_log['turns']} tur)"
+            self._emit_trace(
+                "stage.started",
+                stage="summary",
+                status="started",
+                title="Luna · Daily summary",
+                detail=(
+                    "Gunun olaylari ve tekrar eden "
+                    "oruntuler ozetleniyor."
+                ),
+            )
+
+            summary, s1_log = self._stage1_summarize(
+                safe_data
+            )
+
+            self.report["stages"]["stage1_summary"] = (
+                f"OK ({s1_log['turns']} tur)"
+            )
+
+            self._emit_trace(
+                "stage.completed",
+                stage="summary",
+                status="ok",
+                title="Luna · Daily summary",
+                detail="Gunluk ozet tamamlandi.",
+                metrics={
+                    "turns": int(
+                        s1_log.get("turns") or 0
+                    ),
+                    "chars": len(summary),
+                    "model": str(
+                        s1_log.get("model")
+                        or "production-luna"
+                    ),
+                },
+            )
             self.report["conversation_logs"]["stage1"] = s1_log
 
             if summary.startswith("HATA"):
                 raise RuntimeError(f"Stage 1 basarisiz: {summary}")
 
-            analysis_raw, s2_log = self._stage2_analyze(summary)
+            self._emit_trace(
+                "stage.started",
+                stage="analysis",
+                status="started",
+                title="Sol · Memory analysis",
+                detail=(
+                    "Memory adaylari ve davranissal "
+                    "sinyaller analiz ediliyor."
+                ),
+            )
+
+            analysis_raw, s2_log = self._stage2_analyze(
+                summary
+            )
             self.report["stages"]["stage2_analysis"]     = f"OK ({s2_log['turns']} tur)"
             self.report["conversation_logs"]["stage2"] = s2_log
 
             if analysis_raw.startswith("HATA"):
                 raise RuntimeError(f"Stage 2 basarisiz: {analysis_raw}")
 
-            analysis = self._parse_analysis(analysis_raw)
+            analysis = self._parse_analysis(
+                analysis_raw
+            )
+
+            habits = analysis.get("habits") or {}
+
+            habit_changes = sum(
+                len(habits.get(key) or [])
+                for key in (
+                    "new_detected",
+                    "changed",
+                    "broken",
+                )
+            )
+
+            self._emit_trace(
+                "stage.completed",
+                stage="analysis",
+                status="ok",
+                title="Sol · Memory analysis",
+                detail="Yapisal memory analizi tamamlandi.",
+                metrics={
+                    "turns": int(
+                        s2_log.get("turns") or 0
+                    ),
+                    "insight_count": len(
+                        analysis.get(
+                            "behavioral_insights"
+                        )
+                        or []
+                    ),
+                    "learning_count": len(
+                        analysis.get(
+                            "epis_learnings"
+                        )
+                        or []
+                    ),
+                    "habit_changes": habit_changes,
+                },
+            )
+
+            self._emit_trace(
+                "memory.summary",
+                stage="analysis",
+                status="ok",
+                title="Memory candidates",
+                detail=(
+                    f"{len(analysis.get('epis_learnings') or [])} "
+                    "EPIS ogrenimi · "
+                    f"{len(analysis.get('behavioral_insights') or [])} "
+                    "davranissal icgoru · "
+                    f"{habit_changes} habit degisimi"
+                ),
+                metrics={
+                    "learnings": len(
+                        analysis.get(
+                            "epis_learnings"
+                        )
+                        or []
+                    ),
+                    "insights": len(
+                        analysis.get(
+                            "behavioral_insights"
+                        )
+                        or []
+                    ),
+                    "habit_changes": habit_changes,
+                },
+            )
 
             # All cloud inference sees privacy-filtered / pseudonymized
             # material only. Restoration happens locally afterwards.
+            self._emit_trace(
+                "stage.started",
+                stage="voice",
+                status="started",
+                title="Luna · Morning note",
+                detail=(
+                    "Sabah icin kisa EPIS notu "
+                    "hazirlaniyor."
+                ),
+            )
+
             epis_voice, s3_log = self._stage3_epis_voice(
                 summary,
                 analysis,
@@ -284,6 +600,33 @@ class NightlyRecalculation:
                 else "SKIP"
             )
             self.report["conversation_logs"]["stage3"] = s3_log
+
+            self._emit_trace(
+                "stage.completed",
+                stage="voice",
+                status=(
+                    "ok"
+                    if epis_voice
+                    else "skip"
+                ),
+                title="Luna · Morning note",
+                detail=(
+                    "Sabah notu hazir."
+                    if epis_voice
+                    else (
+                        "Bu run icin morning note "
+                        "uretilmedi."
+                    )
+                ),
+                metrics={
+                    "turns": int(
+                        s3_log.get("turns") or 0
+                    ),
+                    "chars": int(
+                        s3_log.get("chars") or 0
+                    ),
+                },
+            )
 
             summary = self.privacy.deanonymize(
                 summary,
@@ -300,6 +643,17 @@ class NightlyRecalculation:
 
             # AUTHORITATIVE LONG-TERM COMMIT.  Nothing on the cloud may be
             # marked processed/purged before this transaction succeeds.
+            self._emit_trace(
+                "stage.started",
+                stage="memory",
+                status="started",
+                title="Local Memory Vault",
+                detail=(
+                    "Onaylanan gece sonucu yerel "
+                    "encrypted vault'a commit ediliyor."
+                ),
+            )
+
             vault_result = self.vault.apply_nightly_result(
                 day_id=day_id,
                 input_hash=input_hash,
@@ -311,6 +665,25 @@ class NightlyRecalculation:
             )
             self.report["stages"]["memory_vault"] = "OK"
             self.report["memory_vault"] = vault_result
+
+            self._emit_trace(
+                "vault.committed",
+                stage="memory",
+                status="committed",
+                title="Local Memory Vault",
+                detail=(
+                    "Authoritative local transaction "
+                    "commit edildi."
+                ),
+                metrics={
+                    "memory_count": int(
+                        vault_result.get(
+                            "memory_count"
+                        )
+                        or 0
+                    ),
+                },
+            )
 
             # Compatibility mirrors stay best-effort; identity_self.json is
             # intentionally never written by Nightly Recalculation.
@@ -329,8 +702,33 @@ class NightlyRecalculation:
                 self.report["stages"]["habit_update"] = "WARN"
 
             try:
+                self._emit_trace(
+                    "stage.started",
+                    stage="drift",
+                    status="started",
+                    title="Drift check",
+                    detail=(
+                        "Identity ve memory drift "
+                        "kontrol ediliyor."
+                    ),
+                )
+
                 drift_result = self._run_drift_check()
-                self.report["stages"]["drift_check"] = drift_result
+
+                self.report["stages"][
+                    "drift_check"
+                ] = drift_result
+
+                self._emit_trace(
+                    "stage.completed",
+                    stage="drift",
+                    status="ok",
+                    title="Drift check",
+                    detail=(
+                        "Drift kontrolu tamamlandi."
+                    ),
+                )
+
             except Exception as drift_exc:
                 logger.warning(f"Drift check: {drift_exc}")
                 self.report["stages"]["drift_check"] = "WARN"
@@ -361,18 +759,91 @@ class NightlyRecalculation:
 
             # Cloud ACK is deliberately last. If it fails, local memory remains
             # committed and the frozen raw transcript stays on Postgres for retry.
+            self._emit_trace(
+                "stage.started",
+                stage="cloud",
+                status="started",
+                title="Cloud transcript",
+                detail=(
+                    "Local commit dogrulandi; exact "
+                    "receipt ACK ediliyor."
+                ),
+            )
+
             try:
-                self._finish_cloud_transcript(day_id, input_hash)
+                ack_result = (
+                    self._finish_cloud_transcript(
+                        day_id,
+                        input_hash,
+                    )
+                )
+
+                self._emit_trace(
+                    "cloud.acked",
+                    stage="cloud",
+                    status="acked",
+                    title="Cloud transcript",
+                    detail=(
+                        "Raw transcript exact receipt "
+                        "ile purge edildi."
+                    ),
+                    metrics={
+                        "purged": int(
+                            ack_result.get(
+                                "purged"
+                            )
+                            or 0
+                        ),
+                    },
+                )
+
             except Exception as ack_exc:
-                logger.warning(f"Cloud transcript ACK beklemede: {ack_exc}")
+                logger.warning(
+                    "Cloud transcript ACK beklemede: "
+                    f"{ack_exc}"
+                )
+
                 self.report["status"] = "partial"
-                self.report["stages"]["cloud_transcript_ack"] = "PENDING_RETRY"
-                self.report["errors"].append(str(ack_exc))
+                self.report["stages"][
+                    "cloud_transcript_ack"
+                ] = "PENDING_RETRY"
+
+                self.report["errors"].append(
+                    str(ack_exc)
+                )
+
+                self._emit_trace(
+                    "stage.completed",
+                    stage="cloud",
+                    status="pending",
+                    title="Cloud transcript",
+                    detail=(
+                        "ACK beklemede; raw transcript "
+                        "korunuyor."
+                    ),
+                )
+
+            self._emit_trace(
+                "run.completed",
+                status=self.report["status"],
+                title="Nightly Recalculation",
+                detail="Gece islemi tamamlandi.",
+            )
 
         except Exception as e:
             logger.error(f"Kritik hata: {e}", exc_info=True)
             self.report["status"] = "failed"
             self.report["errors"].append(str(e))
+
+            self._emit_trace(
+                "run.failed",
+                status="failed",
+                title="Nightly Recalculation",
+                detail=(
+                    "NC tamamlanamadi; cloud raw veri "
+                    "guvenlik icin korunuyor."
+                ),
+            )
             if day_id and input_hash and not self.vault.is_run_committed(day_id, input_hash):
                 try:
                     self.vault.note_run_failed(day_id, input_hash, str(e))

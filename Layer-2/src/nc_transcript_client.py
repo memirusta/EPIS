@@ -120,6 +120,47 @@ class CloudTranscriptClient:
 
         return text.strip()
 
+    def emit_trace(
+        self,
+        *,
+        run_id: str,
+        day_id: str,
+        seq: int,
+        event: str,
+        stage: str | None = None,
+        status: str | None = None,
+        title: str | None = None,
+        detail: str | None = None,
+        metrics: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Publish one bounded, non-sensitive NC activity event."""
+        body: dict[str, Any] = {
+            "run_id": str(run_id),
+            "day_id": str(day_id),
+            "seq": int(seq),
+            "event": str(event),
+        }
+        if stage is not None:
+            body["stage"] = str(stage)
+        if status is not None:
+            body["status"] = str(status)
+        if title is not None:
+            body["title"] = str(title)
+        if detail is not None:
+            body["detail"] = str(detail)
+        if metrics:
+            body["metrics"] = dict(metrics)
+
+        result = self._json(
+            "POST",
+            "/internal/nc/trace",
+            body=body,
+            timeout=min(self.timeout, 5.0),
+        )
+        if not result.get("ok"):
+            raise RuntimeError("shared_nc_trace_failed")
+        return result
+
     def pending_days(self, *, before_day_id: str | None = None) -> list[dict[str, Any]]:
         suffix = f"?before_day_id={before_day_id}" if before_day_id else ""
         result = self._json("GET", "/internal/transcript/pending" + suffix)

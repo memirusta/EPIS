@@ -161,6 +161,254 @@ class NcInferenceTests(unittest.TestCase):
             120.0,
         )
 
+    def test_cloud_client_emit_trace_uses_bounded_internal_endpoint(self):
+        client = CloudTranscriptClient(
+            base_url="https://example.invalid",
+            token="test-token",
+        )
+
+        calls = []
+
+        def fake_json(
+            method,
+            path,
+            *,
+            body=None,
+            timeout=None,
+        ):
+            calls.append({
+                "method": method,
+                "path": path,
+                "body": body,
+                "timeout": timeout,
+            })
+            return {
+                "ok": True,
+                "accepted": True,
+            }
+
+        client._json = fake_json
+
+        result = client.emit_trace(
+            run_id="20260925_201829",
+            day_id="2026-09-24",
+            seq=3,
+            event="stage.completed",
+            stage="summary",
+            status="ok",
+            title="Daily summary",
+            detail="Summary complete",
+            metrics={
+                "turns": 1,
+                "chars": 2000,
+            },
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            calls[0]["method"],
+            "POST",
+        )
+        self.assertEqual(
+            calls[0]["path"],
+            "/internal/nc/trace",
+        )
+        self.assertEqual(
+            calls[0]["body"]["event"],
+            "stage.completed",
+        )
+        self.assertLessEqual(
+            calls[0]["timeout"],
+            5.0,
+        )
+
+    def test_internal_nc_trace_broadcasts_and_reconnect_gets_snapshot(self):
+        old_token = (
+            server_app.INTERNAL_EVENT_TOKEN
+        )
+
+        server_app.INTERNAL_EVENT_TOKEN = (
+            "nc-trace-token"
+        )
+
+        server_app._nc_trace_runs.clear()
+        server_app._nc_trace_order.clear()
+
+        try:
+            with TestClient(
+                server_app.app
+            ) as client:
+
+                protocols = [
+                    "epis",
+                    server_app.SERVER_TOKEN,
+                ]
+
+                with client.websocket_connect(
+                    "/ws",
+                    subprotocols=protocols,
+                ) as first:
+
+                    self.assertEqual(
+                        first.receive_json()["type"],
+                        "connected",
+                    )
+
+                    first.send_json({
+                        "type": "client.hello",
+                        "version": 2,
+                        "client_id": "trace-client-1",
+                        "client_type": "desktop",
+                    })
+
+                    self.assertEqual(
+                        first.receive_json()["type"],
+                        "client.ready",
+                    )
+
+                    response = client.post(
+                        "/internal/nc/trace",
+                        headers={
+                            "Authorization":
+                                "Bearer nc-trace-token",
+                        },
+                        json={
+                            "run_id":
+                                "20260925_201829",
+                            "day_id":
+                                "2026-09-24",
+                            "seq": 1,
+                            "event":
+                                "run.started",
+                            "stage":
+                                "transcript",
+                            "status":
+                                "started",
+                            "title":
+                                "Nightly Recalculation",
+                            "detail":
+                                "6 messages frozen",
+                            "metrics": {
+                                "message_count": 6,
+                            },
+                        },
+                    )
+
+                    self.assertEqual(
+                        response.status_code,
+                        200,
+                        response.text,
+                    )
+
+                    live = first.receive_json()
+
+                    self.assertEqual(
+                        live["type"],
+                        "nc.trace",
+                    )
+                    self.assertEqual(
+                        live["run_id"],
+                        "20260925_201829",
+                    )
+                    self.assertEqual(
+                        live["metrics"],
+                        {
+                            "message_count": 6,
+                        },
+                    )
+
+                with client.websocket_connect(
+                    "/ws",
+                    subprotocols=protocols,
+                ) as second:
+
+                    self.assertEqual(
+                        second.receive_json()["type"],
+                        "connected",
+                    )
+
+                    second.send_json({
+                        "type": "client.hello",
+                        "version": 2,
+                        "client_id": "trace-client-2",
+                        "client_type": "mobile",
+                    })
+
+                    self.assertEqual(
+                        second.receive_json()["type"],
+                        "client.ready",
+                    )
+
+                    snapshot = (
+                        second.receive_json()
+                    )
+
+                    self.assertEqual(
+                        snapshot["type"],
+                        "nc.trace.snapshot",
+                    )
+                    self.assertEqual(
+                        len(snapshot["events"]),
+                        1,
+                    )
+                    self.assertEqual(
+                        snapshot["events"][0]["seq"],
+                        1,
+                    )
+
+        finally:
+            server_app.INTERNAL_EVENT_TOKEN = (
+                old_token
+            )
+
+            server_app._nc_trace_runs.clear()
+            server_app._nc_trace_order.clear()
+
+    def test_internal_nc_trace_rejects_nested_metrics(self):
+        old_token = (
+            server_app.INTERNAL_EVENT_TOKEN
+        )
+
+        server_app.INTERNAL_EVENT_TOKEN = (
+            "nc-trace-token"
+        )
+
+        try:
+            with TestClient(
+                server_app.app
+            ) as client:
+
+                response = client.post(
+                    "/internal/nc/trace",
+                    headers={
+                        "Authorization":
+                            "Bearer nc-trace-token",
+                    },
+                    json={
+                        "run_id": "run-1",
+                        "day_id":
+                            "2026-09-24",
+                        "seq": 1,
+                        "event":
+                            "stage.completed",
+                        "metrics": {
+                            "unsafe": {
+                                "raw": "content",
+                            },
+                        },
+                    },
+                )
+
+            self.assertEqual(
+                response.status_code,
+                400,
+            )
+
+        finally:
+            server_app.INTERNAL_EVENT_TOKEN = (
+                old_token
+            )
+
     def test_internal_nc_summary_is_stateless_and_tool_free(self):
         luna = FakeLuna()
         sol = FakeSol()

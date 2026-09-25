@@ -34,6 +34,7 @@ class EpisController extends ChangeNotifier {
   final List<DeviceSnapshot> devices = [];
   final List<ApprovalRequest> approvals = [];
   final List<ChatAttachment> pendingAttachments = [];
+  NcTraceRun? nightlyTrace;
   final Set<String> _inFlightRequests = <String>{};
   final Set<String> _approvalSubmitting = <String>{};
   final Map<String, ChatMessage> _pendingUserMessages = {};
@@ -68,7 +69,9 @@ class EpisController extends ChangeNotifier {
         parsed.hasFragment) {
       return null;
     }
-    final path = parsed.path.isEmpty || parsed.path == '/' ? '/ws' : parsed.path;
+    final path = parsed.path.isEmpty || parsed.path == '/'
+        ? '/ws'
+        : parsed.path;
     if (path != '/ws') return null;
     return parsed.replace(path: '/ws').toString();
   }
@@ -108,14 +111,12 @@ class EpisController extends ChangeNotifier {
     devices.clear();
     approvals.clear();
     pendingAttachments.clear();
+    nightlyTrace = null;
     _inFlightRequests.clear();
     _approvalSubmitting.clear();
     _pendingUserMessages.clear();
     error = null;
-    await Future.wait([
-      _client.disconnect(),
-      _deviceAgent.disconnect(),
-    ]);
+    await Future.wait([_client.disconnect(), _deviceAgent.disconnect()]);
     notifyListeners();
   }
 
@@ -167,7 +168,8 @@ class EpisController extends ChangeNotifier {
         pendingAttachments.add(attachment);
       }
     } catch (exc) {
-      error = 'Dosya seçilemedi: ${exc.toString().replaceFirst('Bad state: ', '')}';
+      error =
+          'Dosya seçilemedi: ${exc.toString().replaceFirst('Bad state: ', '')}';
     } finally {
       pickingAttachment = false;
       notifyListeners();
@@ -300,10 +302,16 @@ class EpisController extends ChangeNotifier {
       role: role == 'user' ? ChatRole.user : ChatRole.assistant,
       text: text.trim(),
       attachments: attachments,
-      messageId: map['message_id'] is String ? map['message_id'] as String : null,
-      requestId: map['request_id'] is String ? map['request_id'] as String : null,
+      messageId: map['message_id'] is String
+          ? map['message_id'] as String
+          : null,
+      requestId: map['request_id'] is String
+          ? map['request_id'] as String
+          : null,
       seq: seqValue is num ? seqValue.toInt() : null,
-      createdAt: map['created_at'] is String ? map['created_at'] as String : null,
+      createdAt: map['created_at'] is String
+          ? map['created_at'] as String
+          : null,
       dayId: map['day_id'] is String ? map['day_id'] as String : null,
     );
   }
@@ -364,6 +372,51 @@ class EpisController extends ChangeNotifier {
     );
   }
 
+  String _traceRunStatus(NcTraceEvent event, String current) {
+    if (event.event == 'run.failed') {
+      return 'failed';
+    }
+
+    if (event.event == 'run.completed') {
+      return event.status ?? 'success';
+    }
+
+    if (event.event == 'run.started') {
+      return 'running';
+    }
+
+    return current;
+  }
+
+  void _applyNcTraceEvent(NcTraceEvent event) {
+    final current = nightlyTrace;
+
+    final base = current != null && current.runId == event.runId
+        ? current
+        : NcTraceRun(
+            runId: event.runId,
+            dayId: event.dayId,
+            status: 'running',
+            events: const [],
+          );
+
+    final bySeq = <int, NcTraceEvent>{
+      for (final item in base.events) item.seq: item,
+    };
+
+    bySeq[event.seq] = event;
+
+    final events = bySeq.values.toList()
+      ..sort((left, right) => left.seq.compareTo(right.seq));
+
+    nightlyTrace = base.copyWith(
+      dayId: event.dayId,
+      status: _traceRunStatus(event, base.status),
+      events: events,
+      updatedAt: event.time ?? base.updatedAt,
+    );
+  }
+
   void _handlePayload(Map<String, dynamic> payload) {
     switch (payload['type']) {
       case 'connected':
@@ -376,6 +429,22 @@ class EpisController extends ChangeNotifier {
       case 'client.ready':
         connection = EpisConnectionStatus.online;
         error = null;
+        break;
+
+      case 'nc.trace.snapshot':
+        final snapshot = NcTraceRun.tryParseSnapshot(payload);
+
+        if (snapshot != null) {
+          nightlyTrace = snapshot;
+        }
+        break;
+
+      case 'nc.trace':
+        final event = NcTraceEvent.tryParse(payload);
+
+        if (event != null) {
+          _applyNcTraceEvent(event);
+        }
         break;
 
       case 'chat.accepted':
@@ -392,7 +461,8 @@ class EpisController extends ChangeNotifier {
           } else {
             _activeDayId ??= canonical.dayId;
             final index = messages.indexWhere(
-              (item) => item.role == ChatRole.user && item.requestId == requestId,
+              (item) =>
+                  item.role == ChatRole.user && item.requestId == requestId,
             );
             if (index >= 0) {
               messages[index] = messages[index].copyWith(
