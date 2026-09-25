@@ -29,6 +29,8 @@ DB_PATH      = os.path.join(MEMORY_DIR, "lifetime.db")
 sys.path.insert(0, THIS_DIR)
 from router import EpisRouter
 from crypto_layer import get_cipher, load_json_file
+from memory_vault import LocalMemoryVault
+from nc_transcript_client import CloudTranscriptClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -104,13 +106,24 @@ class NightlyConversation:
 
 class NightlyRecalculation:
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        day_id: str | None = None,
+        transcript_client=None,
+        vault=None,
+    ):
         self.router         = EpisRouter()
         self.cipher         = get_cipher()
-        self.today          = date.today()
+        self.requested_day_id = day_id or (os.getenv("EPIS_NC_DAY_ID") or "").strip() or None
+        self.today          = date.fromisoformat(self.requested_day_id) if self.requested_day_id else date.today()
         self.run_id         = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.now_iso        = datetime.now().isoformat()
         self._pseudonym_map = {}
+        self.transcript_client = transcript_client
+        self.vault = vault or LocalMemoryVault(cipher=self.cipher)
+        self.frozen_transcript: dict = {}
+        self._safe_memory_evidence = ""
 
         self.report = {
             "date":              self.today.isoformat(),
@@ -124,13 +137,87 @@ class NightlyRecalculation:
         }
 
     # ------------------------------------------------------------------
+    # CANONICAL DAILY TRANSCRIPT / MEMORY VAULT BOUNDARY
+    # ------------------------------------------------------------------
+
+    def _get_transcript_client(self):
+        if self.transcript_client is None:
+            self.transcript_client = CloudTranscriptClient()
+        return self.transcript_client
+
+    def _freeze_canonical_day(self) -> dict | None:
+        client = self._get_transcript_client()
+        if self.requested_day_id:
+            frozen = client.freeze(day_id=self.requested_day_id)
+        else:
+            # Nightly normally processes a completed day.  Asking for an older
+            # pending day also makes offline-PC retries automatic.
+            frozen = client.freeze(before_day_id=date.today().isoformat())
+        if not frozen:
+            return None
+        day_id = str(frozen.get("day_id") or "")
+        input_hash = str(frozen.get("input_hash") or "")
+        if not day_id or len(input_hash) != 64:
+            raise RuntimeError("invalid_frozen_transcript")
+        self.today = date.fromisoformat(day_id)
+        self.report["date"] = day_id
+        self.report["transcript"] = {
+            "day_id": day_id,
+            "input_hash": input_hash,
+            "message_count": len(frozen.get("messages") or []),
+            "status": frozen.get("status"),
+        }
+        self.frozen_transcript = frozen
+        return frozen
+
+    def _finish_cloud_transcript(self, day_id: str, input_hash: str) -> dict:
+        result = self._get_transcript_client().acknowledge_and_purge(
+            day_id=day_id,
+            input_hash=input_hash,
+        )
+        purged = int(result.get("purged") or 0)
+        self.vault.mark_cloud_acked(day_id, input_hash, purged)
+        self.report["stages"]["cloud_transcript_ack"] = f"OK (purged={purged})"
+        return result
+
+    # ------------------------------------------------------------------
     # ANA GIRIS NOKTASI
     # ------------------------------------------------------------------
 
     def run(self, sensor_data: dict = None) -> dict:
         logger.info(f"[{self.run_id}] Nightly Recalculation basliyor...")
+        frozen = None
+        day_id = None
+        input_hash = None
 
         try:
+            frozen = self._freeze_canonical_day()
+            if not frozen:
+                self.report["status"] = "partial"
+                self.report["stages"]["daily_transcript"] = "NO_PENDING_DAY"
+                self.report["highlights"].append("Islenecek tamamlanmis gunluk transcript yok.")
+                return self._finalize(persist=False)
+
+            day_id = str(frozen["day_id"])
+            input_hash = str(frozen["input_hash"])
+            self.report["stages"]["daily_transcript"] = "FROZEN"
+
+            # Crash-safe retry: local DB commit already succeeded, but the cloud
+            # ACK/purge may have failed last time. Do not call any model again.
+            if self.vault.is_run_committed(day_id, input_hash):
+                self.report["stages"]["memory_vault"] = "ALREADY_COMMITTED"
+                try:
+                    self._finish_cloud_transcript(day_id, input_hash)
+                    self.report["status"] = "success"
+                    self.report["highlights"].append("Onceki yerel NC commit'i cloud transcript ile uzlastirildi.")
+                except Exception as ack_exc:
+                    self.report["status"] = "partial"
+                    self.report["stages"]["cloud_transcript_ack"] = "PENDING_RETRY"
+                    self.report["errors"].append(str(ack_exc))
+                return self._finalize()
+
+            self.vault.note_run_started(day_id, input_hash, self.run_id)
+
             raw_data = self._collect_daily_data(sensor_data=sensor_data)
             self.report["stages"]["data_collection"] = "OK"
 
@@ -138,10 +225,22 @@ class NightlyRecalculation:
                 logger.warning("Yeterli gunluk veri yok.")
                 self.report["status"] = "partial"
                 self.report["highlights"].append("Bugun icin yeterli veri toplanamadi.")
+                self.vault.note_run_failed(day_id, input_hash, "no_daily_data")
                 return self._finalize()
 
             safe_data = self._apply_privacy(raw_data)
             self.report["stages"]["privacy_layer"] = "OK"
+            evidence_lines = []
+            for item in safe_data.get("interactions", [])[:120]:
+                if item.get("event_type") != "daily_transcript":
+                    continue
+                role = str(item.get("role") or "?")
+                message_id = str(item.get("message_id") or "")
+                body = str(item.get("raw_text") or "").strip().replace("\n", " ")
+                if not body:
+                    continue
+                evidence_lines.append(f"[{message_id}] {role}: {body[:800]}")
+            self._safe_memory_evidence = "\n".join(evidence_lines)[:18000]
 
             summary, s1_log = self._stage1_summarize(safe_data)
             self.report["stages"]["stage1_gemini"]     = f"OK ({s1_log['turns']} tur)"
@@ -159,11 +258,9 @@ class NightlyRecalculation:
 
             analysis = self._parse_analysis(analysis_raw)
 
-            # Yerel saklamadan önce takma adları gerçek adlara çevir
             summary  = self.router.privacy.deanonymize(summary, self._pseudonym_map)
             analysis = self._deanonymize_obj(analysis)
 
-            # Stage-3: EPIS kendi sesiyle yorum (Layer-1 / yerel Qwen)
             epis_voice, s3_log = self._stage3_epis_voice(summary, analysis)
             self.report["stages"]["stage3_epis"] = (
                 f"OK ({s3_log.get('chars', 0)} kar.)" if epis_voice else "SKIP"
@@ -172,24 +269,55 @@ class NightlyRecalculation:
             if epis_voice:
                 self.report["epis_voice"] = epis_voice
 
-            self._update_memory(analysis, summary, epis_voice=epis_voice or "")
-            self.report["stages"]["memory_update"] = "OK"
+            # AUTHORITATIVE LONG-TERM COMMIT.  Nothing on the cloud may be
+            # marked processed/purged before this transaction succeeds.
+            vault_result = self.vault.apply_nightly_result(
+                day_id=day_id,
+                input_hash=input_hash,
+                run_id=self.run_id,
+                summary=summary,
+                analysis=analysis,
+                epis_voice=epis_voice or "",
+                transcript_messages=frozen.get("messages") or [],
+            )
+            self.report["stages"]["memory_vault"] = "OK"
+            self.report["memory_vault"] = vault_result
 
-            self._update_habits(analysis)
-            self.report["stages"]["habit_update"] = "OK"
+            # Compatibility mirrors stay best-effort; identity_self.json is
+            # intentionally never written by Nightly Recalculation.
+            try:
+                self._update_memory(analysis, summary, epis_voice=epis_voice or "")
+                self.report["stages"]["legacy_memory_mirror"] = "OK"
+            except Exception as legacy_exc:
+                logger.warning(f"Legacy memory mirror: {legacy_exc}")
+                self.report["stages"]["legacy_memory_mirror"] = "WARN"
 
-            drift_result = self._run_drift_check()
-            self.report["stages"]["drift_check"] = drift_result
+            try:
+                self._update_habits(analysis)
+                self.report["stages"]["habit_update"] = "OK"
+            except Exception as habit_exc:
+                logger.warning(f"Legacy habit mirror: {habit_exc}")
+                self.report["stages"]["habit_update"] = "WARN"
 
-            self._prepare_vault_sync()
-            self.report["stages"]["vault_sync"] = "PENDING"
+            try:
+                drift_result = self._run_drift_check()
+                self.report["stages"]["drift_check"] = drift_result
+            except Exception as drift_exc:
+                logger.warning(f"Drift check: {drift_exc}")
+                self.report["stages"]["drift_check"] = "WARN"
+
+            try:
+                self._prepare_vault_sync()
+                self.report["stages"]["vault_sync"] = "PENDING"
+            except Exception as sync_exc:
+                logger.warning(f"Legacy vault sync prep: {sync_exc}")
+                self.report["stages"]["vault_sync"] = "WARN"
 
             self.report["status"]     = "success"
             self.report["highlights"] = analysis.get("behavioral_insights", [])[:3]
             if analysis.get("tomorrow_context"):
                 self.report["tomorrow_context"] = analysis["tomorrow_context"]
 
-            # Sabah icin pending: EPIS sesi varsa onu kullan
             if epis_voice:
                 try:
                     pending_path = os.path.join(MEMORY_DIR, "pending.json")
@@ -202,13 +330,111 @@ class NightlyRecalculation:
                 except Exception as pe:
                     logger.warning(f"morning_brief pending yazilamadi: {pe}")
 
+            # Cloud ACK is deliberately last. If it fails, local memory remains
+            # committed and the frozen raw transcript stays on Postgres for retry.
+            try:
+                self._finish_cloud_transcript(day_id, input_hash)
+            except Exception as ack_exc:
+                logger.warning(f"Cloud transcript ACK beklemede: {ack_exc}")
+                self.report["status"] = "partial"
+                self.report["stages"]["cloud_transcript_ack"] = "PENDING_RETRY"
+                self.report["errors"].append(str(ack_exc))
+
         except Exception as e:
             logger.error(f"Kritik hata: {e}", exc_info=True)
             self.report["status"] = "failed"
             self.report["errors"].append(str(e))
+            if day_id and input_hash and not self.vault.is_run_committed(day_id, input_hash):
+                try:
+                    self.vault.note_run_failed(day_id, input_hash, str(e))
+                except Exception:
+                    pass
             self._handle_failure(str(e))
 
         return self._finalize()
+
+    def _new_backlog_worker(self, day_id: str, client):
+        return NightlyRecalculation(
+            day_id=day_id,
+            transcript_client=client,
+            vault=self.vault,
+        )
+
+    def run_backlog(
+        self,
+        sensor_data: dict = None,
+        *,
+        max_days: int | None = None,
+    ) -> dict:
+        """Drain completed pending days oldest-first on the trusted local node.
+
+        Kairos may be offline for multiple nights.  A single wake/start should
+        therefore catch up a bounded backlog instead of processing one day per
+        future night forever.  Each day still uses the exact same freeze ->
+        local commit -> cloud ACK boundary implemented by ``run``.
+        """
+        if self.requested_day_id:
+            return self.run(sensor_data=sensor_data)
+
+        client = self._get_transcript_client()
+        before_day_id = date.today().isoformat()
+        pending = client.pending_days(before_day_id=before_day_id)
+        if not pending:
+            return {
+                "date": before_day_id,
+                "run_id": self.run_id,
+                "status": "idle",
+                "stages": {"daily_transcript": "NO_PENDING_DAY"},
+                "processed_days": [],
+                "errors": [],
+                "generated_at": datetime.now().isoformat(),
+            }
+
+        if max_days is None:
+            try:
+                max_days = int(os.getenv("EPIS_NC_MAX_DAYS_PER_RUN", "7"))
+            except ValueError:
+                max_days = 7
+        max_days = max(1, min(int(max_days), 31))
+
+        reports: list[dict] = []
+        for item in pending[:max_days]:
+            target_day = str(item.get("day_id") or "").strip()
+            if not target_day:
+                continue
+            worker = self._new_backlog_worker(target_day, client)
+            # ``sensor_data`` represents the currently running machine/day.
+            # Backlog days are already completed, so attaching today's live
+            # sensor snapshot to an older date would create false evidence.
+            report = worker.run(sensor_data=None)
+            reports.append(report)
+            if report.get("status") != "success":
+                break
+
+        processed_days = [
+            str(report.get("date") or "")
+            for report in reports
+            if report.get("status") == "success"
+        ]
+        failed = next((r for r in reports if r.get("status") == "failed"), None)
+        partial = next((r for r in reports if r.get("status") == "partial"), None)
+        status = "failed" if failed else ("partial" if partial else "success")
+        errors = []
+        for report in reports:
+            errors.extend(report.get("errors") or [])
+        return {
+            "date": reports[-1].get("date") if reports else before_day_id,
+            "run_id": self.run_id,
+            "status": status,
+            "stages": {
+                "backlog": f"{len(processed_days)}/{min(len(pending), max_days)} processed",
+                "remaining_hint": max(0, len(pending) - len(processed_days)),
+            },
+            "processed_days": processed_days,
+            "reports": reports,
+            "errors": errors,
+            "generated_at": datetime.now().isoformat(),
+        }
 
     # ------------------------------------------------------------------
     # 1. VERI TOPLAMA
@@ -229,29 +455,51 @@ class NightlyRecalculation:
         if sensor_data:
             data["source_status"]["sensors"] = "Kairos tarafindan saglandi"
 
+        # Canonical raw conversation comes from the frozen cloud transcript.
+        transcript_messages = list(self.frozen_transcript.get("messages") or [])
+        data["interactions"] = [
+            {
+                "timestamp": str(item.get("created_at") or ""),
+                "event_type": "daily_transcript",
+                "message_id": str(item.get("message_id") or ""),
+                "role": str(item.get("role") or ""),
+                "raw_text": str(item.get("text") or ""),
+                "observation": "",
+                "tags": json.dumps(
+                    {"source": item.get("source"), "attachments": item.get("attachments") or []},
+                    ensure_ascii=False,
+                ),
+            }
+            for item in transcript_messages
+            if str(item.get("text") or "").strip()
+        ]
+        data["source_status"]["daily_transcript"] = f"{len(data['interactions'])} mesaj"
+
+        # Non-chat local events can still enrich the day, but legacy raw chat/session
+        # rows are not re-imported into the new memory pipeline.
         try:
             if os.path.exists(DB_PATH) and os.path.getsize(DB_PATH) > 0:
                 conn   = sqlite3.connect(DB_PATH)
                 cursor = conn.cursor()
                 cursor.execute(
                     "SELECT timestamp, event_type, raw_text, epis_observation, ai_analysis_tags "
-                    "FROM lifetime_log WHERE timestamp LIKE ? ORDER BY timestamp",
+                    "FROM lifetime_log WHERE timestamp LIKE ? AND event_type NOT IN ('chat','session') "
+                    "ORDER BY timestamp",
                     (f"{self.today.isoformat()}%",)
                 )
                 rows = cursor.fetchall()
                 conn.close()
-                # raw_text + epis_observation alan sifreli olabilir -> coz
-                data["interactions"] = [
+                data["interactions"].extend([
                     {"timestamp": r[0], "event_type": r[1],
                      "raw_text": self.cipher.decrypt_str(r[2] or ""),
                      "observation": self.cipher.decrypt_str(r[3] or ""),
                      "tags": r[4] or "[]"}
                     for r in rows
-                ]
-                data["source_status"]["lifetime_db"] = f"{len(rows)} kayit"
+                ])
+                data["source_status"]["lifetime_aux"] = f"{len(rows)} kayit"
         except Exception as e:
-            logger.warning(f"Lifetime DB: {e}")
-            data["source_status"]["lifetime_db"] = f"HATA: {e}"
+            logger.warning(f"Lifetime auxiliary DB: {e}")
+            data["source_status"]["lifetime_aux"] = f"HATA: {e}"
 
         # current_state.json duz metin; people.json sifreli olabilir
         try:
@@ -418,6 +666,15 @@ Kisisel isim KULLANMA -- [KNOWN_USER] formatini koru."""
   "focus_quality": "derin | orta | daginik",
   "stress_signal": "yok | hafif | orta | yuksek",
   "key_events": ["olay 1", "olay 2"],
+  "memory_candidates": [
+    {
+      "kind": "fact | preference | goal | project | commitment | relationship | other",
+      "subject": "user veya ilgili konu/kisi",
+      "content": "gelecekte gerçekten yararlı olacak açık bilgi",
+      "confidence": 0.0,
+      "evidence_message_ids": ["mesaj-id"]
+    }
+  ],
   "habits": {
     "confirmed": [], "new_detected": [], "changed": [], "broken": []
   },
@@ -432,6 +689,17 @@ Kisisel isim KULLANMA -- [KNOWN_USER] formatini koru."""
 [KNOWN_USER] adli kullanicinin bugunune ait ozet veri:
 
 {summary}
+
+HAM GUNLUK KANIT (privacy katmanindan gecmis, yalnizca hafiza adaylarini dogrulamak icin):
+{self._safe_memory_evidence or "(yok)"}
+
+KALICI HAFIZA KURALLARI:
+- memory_candidates sadece gelecekte baska bir gunde ise yarayacak acik/kuvvetli bilgileri icersin.
+- Gecici test metinlerini, selamlasmayi, modelin kendi cevabini veya tahmini kalici bilgi yapma.
+- URL/ayar/proje bilgisi ancak kullaniciya ait kalici bir sistem/proje gercegiyse saklanabilir.
+- Duygu/karakter cikarimini kullanicinin kendi sozu gibi kaydetme; bunlar behavioral_insights tarafinda kalsin.
+- Her aday icin mumkunse kanittaki gercek message_id degerlerini yaz.
+- identity_self / kullanicinin kendi tanimladigi kimlik degerlerini degistirmeye calisma.
 
 YALNIZCA asagidaki JSON formatinda yanitla. Baska hicbir sey yazma.
 
@@ -556,7 +824,8 @@ YALNIZCA asagidaki JSON formatinda yanitla. Baska hicbir sey yazma.
                 "date": self.today.isoformat(),
                 "mood_estimate": "bilinmiyor", "energy_level": "bilinmiyor",
                 "focus_quality": "bilinmiyor", "stress_signal": "bilinmiyor",
-                "key_events": [], "habits": {"confirmed": [], "new_detected": [], "changed": [], "broken": []},
+                "key_events": [], "memory_candidates": [],
+                "habits": {"confirmed": [], "new_detected": [], "changed": [], "broken": []},
                 "behavioral_insights": [raw[:400]],
                 "anomalies": [], "epis_learnings": [],
                 "tomorrow_context": "", "weekly_contribution": "",
@@ -803,9 +1072,10 @@ YALNIZCA asagidaki JSON formatinda yanitla. Baska hicbir sey yazma.
     # 10. FINALIZE
     # ------------------------------------------------------------------
 
-    def _finalize(self) -> dict:
+    def _finalize(self, *, persist: bool = True) -> dict:
         self.report["generated_at"] = datetime.now().isoformat()
-        self._write_json(os.path.join(MEMORY_DIR, "morning_report.json"), self.report)
+        if persist:
+            self._write_json(os.path.join(MEMORY_DIR, "morning_report.json"), self.report)
         logger.info(
             f"[{self.run_id}] Bitti -- Durum: {self.report['status']} | "
             f"Asamalar: {self.report['stages']}"
@@ -845,7 +1115,7 @@ if __name__ == "__main__":
     print("=" * 55)
 
     nr     = NightlyRecalculation()
-    report = nr.run()
+    report = nr.run_backlog()
 
     print(f"\nDurum   : {report['status']}")
     print(f"Asamalar: {report['stages']}")

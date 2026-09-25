@@ -92,6 +92,8 @@ class Kairos:
     def run(self):
         self._schedule_jobs()
         logger.info("Kairos aktif -- bekliyor.")
+        # Memory v1: catch up completed transcript days when this trusted node starts.
+        self._trigger_nightly()
         while True:
             schedule.run_pending()
             self._sensor_loop()
@@ -108,6 +110,8 @@ class Kairos:
         schedule.every().day.at(end_of_day).do(self._trigger_end_of_day)
         schedule.every().day.at(pre_sleep).do(self._trigger_pre_sleep)
         schedule.every().day.at(sleep_time).do(self._trigger_fallback_nightly)
+        # Process the previous calendar day only after rollover; startup covers offline gaps.
+        schedule.every().day.at("00:15").do(self._trigger_nightly)
         schedule.every(1).hours.do(self._trigger_pending_check)
         schedule.every(1).hours.do(self._trigger_deadline_check)
 
@@ -285,7 +289,7 @@ class Kairos:
                 sensor_data["screen_distraction"] = merged
 
             from nightly_recalculation import NightlyRecalculation
-            report = NightlyRecalculation().run(sensor_data=sensor_data)
+            report = NightlyRecalculation().run_backlog(sensor_data=sensor_data)
 
             if report.get("status") == "failed":
                 self._write_pending(

@@ -95,6 +95,20 @@ class DailyTranscriptStoreTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.store.append_message(role="assistant", text="geç mesaj")
 
+    def test_pending_days_are_ordered_and_exclude_processed_days(self):
+        self.store.append_message(role="user", text="older", day_id="2026-09-20")
+        frozen = self.store.freeze_day("2026-09-20")
+        self.store.append_message(role="user", text="newer", day_id="2026-09-21")
+
+        pending = self.store.list_pending_days(before_day_id="2026-09-22")
+        self.assertEqual([row["day_id"] for row in pending], ["2026-09-20", "2026-09-21"])
+        self.assertEqual(pending[0]["status"], "frozen")
+        self.assertEqual(pending[1]["status"], "active")
+
+        self.assertTrue(self.store.mark_processed("2026-09-20", frozen["input_hash"]))
+        after = self.store.list_pending_days(before_day_id="2026-09-22")
+        self.assertEqual([row["day_id"] for row in after], ["2026-09-21"])
+
     def test_raw_messages_cannot_be_purged_before_verified_processing(self):
         self.store.append_message(role="user", text="silinmemeli")
         frozen = self.store.freeze_day()
@@ -125,6 +139,8 @@ class DailyTranscriptWebsocketTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.previous_store = server_app._transcript_store
+        self.previous_internal_token = server_app.INTERNAL_EVENT_TOKEN
+        server_app.INTERNAL_EVENT_TOKEN = "phase-b-test-token"
         server_app._transcript_store = SqliteDailyTranscriptStore(
             Path(self.temp.name) / "server.sqlite3",
             durable=True,
@@ -132,6 +148,7 @@ class DailyTranscriptWebsocketTests(unittest.TestCase):
 
     def tearDown(self):
         server_app._transcript_store = self.previous_store
+        server_app.INTERNAL_EVENT_TOKEN = self.previous_internal_token
         self.temp.cleanup()
 
     def test_desktop_import_bootstraps_empty_day_and_mobile_sync_sees_it(self):
@@ -180,6 +197,45 @@ class DailyTranscriptWebsocketTests(unittest.TestCase):
                 )
                 self.assertTrue(all(item.get("message_id") for item in synced["messages"]))
                 self.assertTrue(all(item.get("seq") for item in synced["messages"]))
+
+    def test_internal_nc_endpoints_freeze_ack_and_purge_exact_receipt(self):
+        store = server_app.get_transcript_store()
+        store.append_message(role="user", text="NC raw", day_id="2026-09-20")
+        headers = {"Authorization": "Bearer phase-b-test-token"}
+        with TestClient(server_app.app) as client:
+            pending = client.get(
+                "/internal/transcript/pending?before_day_id=2026-09-21",
+                headers=headers,
+            )
+            self.assertEqual(pending.status_code, 200)
+            self.assertEqual(pending.json()["days"][0]["day_id"], "2026-09-20")
+
+            frozen_response = client.post(
+                "/internal/transcript/freeze",
+                headers=headers,
+                json={"day_id": "2026-09-20"},
+            )
+            self.assertEqual(frozen_response.status_code, 200)
+            frozen = frozen_response.json()["transcript"]
+            self.assertEqual(frozen["status"], "frozen")
+            self.assertEqual(len(frozen["messages"]), 1)
+
+            wrong = client.post(
+                "/internal/transcript/processed",
+                headers=headers,
+                json={"day_id": "2026-09-20", "input_hash": "0" * 64, "purge": True},
+            )
+            self.assertEqual(wrong.status_code, 409)
+            self.assertEqual(len(store.list_messages("2026-09-20")), 1)
+
+            ack = client.post(
+                "/internal/transcript/processed",
+                headers=headers,
+                json={"day_id": "2026-09-20", "input_hash": frozen["input_hash"], "purge": True},
+            )
+            self.assertEqual(ack.status_code, 200)
+            self.assertEqual(ack.json()["purged"], 1)
+            self.assertEqual(store.list_messages("2026-09-20"), [])
 
     def test_mobile_cannot_import_local_history(self):
         with TestClient(server_app.app) as client:

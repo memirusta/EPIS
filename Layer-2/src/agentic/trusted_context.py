@@ -65,7 +65,15 @@ def _personal_context(arguments: dict[str, Any]) -> dict[str, Any]:
     try:
         MemoryManager, ContextBuilder, PrivacyFilter = _load_legacy_context_modules()
         memory = MemoryManager()
-        raw_context = ContextBuilder(memory).build(query)
+        builder = ContextBuilder(memory)
+        build_trusted_packet = getattr(builder, "build_trusted_packet", None)
+        if callable(build_trusted_packet):
+            raw_context = build_trusted_packet(query)
+        else:
+            # Compatibility for legacy/test ContextBuilder implementations.
+            # Production ContextBuilder has build_trusted_packet(), which keeps
+            # raw session archives/thinking logs out of the cloud packet.
+            raw_context = builder.build(query)
         safe_context, mapping = PrivacyFilter().anonymize(raw_context)
     except RuntimeError as exc:
         return {"ok": False, "error": str(exc)}

@@ -354,6 +354,36 @@ class SqliteDailyTranscriptStore:
             for row in rows
         ]
 
+    def list_pending_days(
+        self,
+        *,
+        before_day_id: str | None = None,
+        limit: int = 31,
+    ) -> list[dict[str, Any]]:
+        """Return active/frozen days that still require trusted-local NC."""
+        params: list[Any] = []
+        where = "d.status IN ('active','frozen')"
+        if before_day_id:
+            where += " AND d.day_id < ?"
+            params.append(before_day_id)
+        params.append(max(1, min(int(limit), 366)))
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT d.day_id, d.status, d.input_hash, d.created_at, d.updated_at,
+                       d.frozen_at, COUNT(m.seq) AS message_count
+                FROM daily_transcript_days d
+                LEFT JOIN daily_transcript_messages m ON m.day_id=d.day_id
+                WHERE {where}
+                GROUP BY d.day_id, d.status, d.input_hash, d.created_at, d.updated_at, d.frozen_at
+                HAVING COUNT(m.seq) > 0
+                ORDER BY d.day_id ASC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def import_if_empty(
         self,
         messages: list[dict[str, Any]],
@@ -597,6 +627,47 @@ class SqliteDailyTranscriptStore:
             connection.commit()
             return int(cursor.rowcount)
 
+    def acknowledge_processed(
+        self,
+        day_id: str,
+        input_hash: str,
+        *,
+        purge: bool = True,
+    ) -> dict[str, Any]:
+        """Atomically verify the frozen receipt, mark processed, and purge raw rows."""
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            state = connection.execute(
+                "SELECT status, input_hash FROM daily_transcript_days WHERE day_id = ?",
+                (day_id,),
+            ).fetchone()
+            if state is None or state["input_hash"] != input_hash:
+                connection.rollback()
+                raise RuntimeError("transcript_receipt_mismatch")
+            if state["status"] == "frozen":
+                now = _utc_now()
+                connection.execute(
+                    """
+                    UPDATE daily_transcript_days
+                    SET status='processed', processed_at=?, updated_at=?
+                    WHERE day_id=? AND status='frozen' AND input_hash=?
+                    """,
+                    (now, now, day_id, input_hash),
+                )
+            elif state["status"] != "processed":
+                connection.rollback()
+                raise RuntimeError("transcript_receipt_mismatch")
+
+            purged = 0
+            if purge:
+                cursor = connection.execute(
+                    "DELETE FROM daily_transcript_messages WHERE day_id = ?",
+                    (day_id,),
+                )
+                purged = int(cursor.rowcount)
+            connection.commit()
+            return {"marked": True, "purged": purged}
+
 
 class PostgresDailyTranscriptStore:
     backend = "postgres"
@@ -803,6 +874,47 @@ class PostgresDailyTranscriptStore:
             )
             rows = cursor.fetchall()
         return [self._row_payload(row) for row in rows]
+
+    def list_pending_days(
+        self,
+        *,
+        before_day_id: str | None = None,
+        limit: int = 31,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where = "d.status IN ('active','frozen')"
+        if before_day_id:
+            where += " AND d.day_id < %s"
+            params.append(before_day_id)
+        params.append(max(1, min(int(limit), 366)))
+        with self._lock, self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT d.day_id, d.status, d.input_hash, d.created_at, d.updated_at,
+                       d.frozen_at, COUNT(m.seq) AS message_count
+                FROM daily_transcript_days d
+                LEFT JOIN daily_transcript_messages m ON m.day_id=d.day_id
+                WHERE {where}
+                GROUP BY d.day_id, d.status, d.input_hash, d.created_at, d.updated_at, d.frozen_at
+                HAVING COUNT(m.seq) > 0
+                ORDER BY d.day_id ASC
+                LIMIT %s
+                """,
+                tuple(params),
+            )
+            rows = cursor.fetchall()
+        return [
+            {
+                "day_id": row[0],
+                "status": row[1],
+                "input_hash": row[2],
+                "created_at": row[3].isoformat() if hasattr(row[3], "isoformat") else str(row[3]),
+                "updated_at": row[4].isoformat() if hasattr(row[4], "isoformat") else str(row[4]),
+                "frozen_at": (row[5].isoformat() if row[5] is not None and hasattr(row[5], "isoformat") else (str(row[5]) if row[5] is not None else None)),
+                "message_count": int(row[6] or 0),
+            }
+            for row in rows
+        ]
 
     def import_if_empty(
         self,
@@ -1035,6 +1147,47 @@ class PostgresDailyTranscriptStore:
             count = int(cursor.rowcount)
             connection.commit()
             return count
+
+    def acknowledge_processed(
+        self,
+        day_id: str,
+        input_hash: str,
+        *,
+        purge: bool = True,
+    ) -> dict[str, Any]:
+        """Atomically verify the frozen receipt, mark processed, and purge raw rows."""
+        with self._lock, self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT status, input_hash FROM daily_transcript_days WHERE day_id = %s FOR UPDATE",
+                (day_id,),
+            )
+            state = cursor.fetchone()
+            if state is None or state[1] != input_hash:
+                connection.rollback()
+                raise RuntimeError("transcript_receipt_mismatch")
+            if state[0] == "frozen":
+                now = _utc_now()
+                cursor.execute(
+                    """
+                    UPDATE daily_transcript_days
+                    SET status='processed', processed_at=%s, updated_at=%s
+                    WHERE day_id=%s AND status='frozen' AND input_hash=%s
+                    """,
+                    (now, now, day_id, input_hash),
+                )
+            elif state[0] != "processed":
+                connection.rollback()
+                raise RuntimeError("transcript_receipt_mismatch")
+
+            purged = 0
+            if purge:
+                cursor.execute(
+                    "DELETE FROM daily_transcript_messages WHERE day_id = %s",
+                    (day_id,),
+                )
+                purged = int(cursor.rowcount)
+            connection.commit()
+            return {"marked": True, "purged": purged}
 
 
 def build_daily_transcript_store(

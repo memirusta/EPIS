@@ -5,6 +5,7 @@ import logging
 from datetime import datetime
 
 from crypto_layer import get_cipher, load_json_file, save_json_file
+from memory_vault import LocalMemoryVault
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - MEMORY - %(message)s')
 
@@ -36,6 +37,28 @@ class MemoryManager:
 
         self._ensure_directories()
         self._init_sqlite_db()
+
+        # Memory v1: authoritative distilled long-term memory lives in a
+        # trusted user-local SQLite vault.  The old repo-local lifetime.db and
+        # JSON files remain read-compatible during migration, but are no longer
+        # the target for new NC long-term memory.
+        explicit_vault_path = (os.getenv("EPIS_MEMORY_VAULT_PATH") or "").strip()
+        if not explicit_vault_path and (os.getenv("EPIS_MEMORY_DIR") or "").strip():
+            # Tests/dev callers that deliberately redirect EPIS_MEMORY_DIR stay
+            # isolated instead of touching the user's real LOCALAPPDATA vault.
+            explicit_vault_path = os.path.join(self.memory_dir, "memory-vault.sqlite3")
+        self.vault = LocalMemoryVault(
+            path=explicit_vault_path or None,
+            cipher=self.cipher,
+        )
+        try:
+            self.vault_migration = self.vault.migrate_legacy_once(
+                self.memory_dir,
+                self.identity_dir,
+            )
+        except Exception as exc:
+            logging.warning(f"Memory vault legacy migration: {exc}")
+            self.vault_migration = {"error": type(exc).__name__}
 
     def _ensure_directories(self):
         os.makedirs(self.identity_dir, exist_ok=True)
@@ -131,18 +154,64 @@ class MemoryManager:
     # ------------------------------------------------------------------
 
     def get_people(self) -> dict:
-        """people.json icerigini doner (sifreliyse cozulmus). Yoksa bos sozluk."""
+        """Return migrated vault people, falling back to legacy people.json."""
+        try:
+            vaulted = self.vault.list_people()
+            if vaulted.get("people"):
+                return vaulted
+        except Exception as exc:
+            logging.warning(f"get_people vault: {exc}")
         data = load_json_file(self.people_path)
         return data or {}
 
     def save_people(self, data: dict):
         save_json_file(self.people_path, data, encrypt=True)
+        try:
+            for name, info in (data.get("people") or {}).items():
+                if not isinstance(info, dict):
+                    info = {"notes": str(info)}
+                self.vault.upsert_person(
+                    name,
+                    aliases=list(info.get("aliases") or []),
+                    notes=str(info.get("notes") or ""),
+                    confidence=1.0,
+                    metadata={"legacy_relation": info.get("relation")},
+                )
+        except Exception as exc:
+            logging.warning(f"save_people vault sync: {exc}")
 
     def get_known_entities(self) -> list:
         people_data = self.get_people()
         if not people_data:
             return ["kullanıcı"]
         return list(people_data.get("people", {}).keys())
+
+    # ------------------------------------------------------------------
+    # Memory v1 local vault (authoritative distilled long-term memory)
+    # ------------------------------------------------------------------
+
+    def get_relevant_memories(self, query: str, limit: int = 8) -> list[dict]:
+        try:
+            return self.vault.search_relevant(query, limit=limit)
+        except Exception as exc:
+            logging.warning(f"get_relevant_memories: {exc}")
+            return []
+
+    def get_recent_distilled_memories(self, limit: int = 5) -> list[dict]:
+        try:
+            return self.vault.recent_memories(limit=limit)
+        except Exception as exc:
+            logging.warning(f"get_recent_distilled_memories: {exc}")
+            return []
+
+    def memory_vault_status(self) -> dict:
+        return {
+            "backend": "sqlite",
+            "path": self.vault.path.name,
+            "local_only": True,
+            "schema_version": self.vault.schema_version,
+            "legacy_migration": self.vault_migration,
+        }
 
     # ------------------------------------------------------------------
     # lifetime.db (alan sifreleme: raw_text + epis_observation)

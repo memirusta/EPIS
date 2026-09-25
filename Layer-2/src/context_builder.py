@@ -102,6 +102,66 @@ class ContextBuilder:
         """Time only: never read memory, sensors, screen or phone in this path."""
         return self._time_context()
 
+    def build_trusted_packet(self, user_message: str = "") -> str:
+        """Bounded personal-context packet for the cloud conversational brain.
+
+        Unlike the legacy local ``build`` path, this deliberately excludes raw
+        session archives and thinking logs.  It sends only current context that
+        is relevant to the question plus distilled Memory Vault entries.
+        """
+        msg_low = (user_message or "").lower()
+        parts = []
+        try:
+            parts.append(self._time_context())
+        except Exception as exc:
+            logger.warning(f"trusted time_context: {exc}")
+
+        try:
+            state = self._state_context()
+            if state:
+                parts.append(state)
+        except Exception as exc:
+            logger.warning(f"trusted state_context: {exc}")
+
+        try:
+            memory = self._distilled_memory_context(user_message)
+            if memory:
+                parts.append(memory)
+        except Exception as exc:
+            logger.warning(f"trusted memory_context: {exc}")
+
+        try:
+            people = self._people_context(user_message)
+            if people:
+                parts.append(people)
+        except Exception as exc:
+            logger.warning(f"trusted people_context: {exc}")
+
+        # Sensors/screen are current-world context, not long-term memory. Include
+        # them only when the question actually asks for that information.
+        try:
+            sensor = self._sensor_context(user_message)
+            if sensor:
+                parts.append(sensor)
+        except Exception as exc:
+            logger.warning(f"trusted sensor_context: {exc}")
+        try:
+            screen = self._screen_context(user_message)
+            if screen:
+                parts.append(screen)
+        except Exception as exc:
+            logger.warning(f"trusted screen_context: {exc}")
+
+        if self._is_recall_question(msg_low) and not any(
+            part.startswith("## İLGİLİ UZUN SÜRELİ HAFIZA") for part in parts
+        ):
+            parts.append(
+                "## HAFIZA DURUMU\n"
+                "Bu sorguyla eşleşen doğrulanmış uzun süreli hafıza kaydı bulunamadı. "
+                "Eski ham sohbet arşivinden tahmin yürütme."
+            )
+        return "\n\n".join(parts)
+
     def build(self, user_message: str = "") -> str:
         """Bağlam bloğunu string olarak döner. Hata olursa en azından zamanı verir."""
         msg_low = (user_message or "").lower()
@@ -265,6 +325,36 @@ class ContextBuilder:
             + "\n".join(out)
             + "\nkullanıcı gecmise atifta bulunursa once buraya bak; ayni konuyu sifirdan uydurma."
         )
+
+    def _distilled_memory_context(self, user_message: str) -> str:
+        getter = getattr(self.memory, "get_relevant_memories", None)
+        if getter is None:
+            return ""
+        query = (user_message or "").strip()
+        if not query:
+            return ""
+        rows = getter(query, limit=8) or []
+        if not rows:
+            return ""
+        lines = [
+            "## İLGİLİ UZUN SÜRELİ HAFIZA",
+            "Yalnızca soruyla ilgili damıtılmış kayıtlar. Bunları ham günlük sohbet gibi sunma.",
+        ]
+        for row in rows[:8]:
+            content = str(row.get("content") or "").strip().replace("\n", " | ")
+            if not content:
+                continue
+            if len(content) > 260:
+                content = content[:260] + "..."
+            kind = str(row.get("kind") or "memory")
+            day = str(row.get("source_day") or "?")
+            confidence = row.get("confidence")
+            try:
+                confidence_text = f"{float(confidence):.2f}"
+            except (TypeError, ValueError):
+                confidence_text = "?"
+            lines.append(f"- [{day}] ({kind}, güven={confidence_text}) {content}")
+        return "\n".join(lines) if len(lines) > 2 else ""
 
     def _memory_context(self, user_message: str) -> str:
         msg_low = (user_message or "").lower()

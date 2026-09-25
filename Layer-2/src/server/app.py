@@ -21,7 +21,7 @@ from agentic.devices import Device
 from server.daily_transcript import build_daily_transcript_store, day_id_for
 
 
-SERVER_VERSION = "0.8.0"
+SERVER_VERSION = "0.9.0"
 DEPLOYMENT_MODE = os.getenv("EPIS_DEPLOYMENT", "local").strip().lower()
 SERVER_TOKEN = os.getenv("EPIS_SERVER_TOKEN", "").strip()
 WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "").strip()
@@ -80,6 +80,24 @@ _TEXT_EXTENSIONS = {
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def public_error_detail(exc: Exception) -> str:
+    """Return a bounded, redacted error string safe for API/client responses."""
+    detail = str(exc).strip() or exc.__class__.__name__
+    # Never reflect obvious credentials or connection-string userinfo to clients.
+    detail = re.sub(
+        r"(?i)(postgres(?:ql)?://)[^@\s/]+@",
+        r"\1***@",
+        detail,
+    )
+    detail = re.sub(r"(?i)(bearer\s+)[^\s]+", r"\1***", detail)
+    detail = re.sub(
+        r"(?i)((?:token|secret|password|api[_-]?key)\s*[=:]\s*)[^\s,;]+",
+        r"\1***",
+        detail,
+    )
+    return detail[:500]
 
 
 def _valid_id(value: Any) -> str | None:
@@ -664,6 +682,128 @@ async def health() -> dict[str, Any]:
         "authentication": "required" if SERVER_TOKEN else "local-only",
         "time": utc_now(),
     }
+
+
+def _require_internal_event(request: Request) -> None:
+    _require_shared_secret(
+        request,
+        INTERNAL_EVENT_TOKEN,
+        alt_header="x-epis-internal-token",
+        missing_error="EPIS_INTERNAL_EVENT_TOKEN is required in cloud mode",
+    )
+
+
+def _valid_day_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        return None
+    try:
+        datetime.strptime(raw, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return raw
+
+
+@app.get("/internal/transcript/pending")
+async def transcript_pending(request: Request):
+    """List unprocessed days for the trusted local NC worker."""
+    _require_internal_event(request)
+    before_raw = request.query_params.get("before_day_id")
+    before_day_id = _valid_day_id(before_raw) if before_raw else None
+    if before_raw and before_day_id is None:
+        raise HTTPException(status_code=400, detail="invalid_day_id")
+    try:
+        days = await asyncio.to_thread(
+            get_transcript_store().list_pending_days,
+            before_day_id=before_day_id,
+            limit=31,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=public_error_detail(exc)) from exc
+    return JSONResponse({"ok": True, "days": days, "time": utc_now()})
+
+
+@app.post("/internal/transcript/freeze")
+async def transcript_freeze(request: Request):
+    """Freeze one exact day and return its immutable raw transcript."""
+    _require_internal_event(request)
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="invalid_payload")
+
+    explicit_raw = data.get("day_id")
+    explicit_day = _valid_day_id(explicit_raw) if explicit_raw else None
+    if explicit_raw and explicit_day is None:
+        raise HTTPException(status_code=400, detail="invalid_day_id")
+
+    before_raw = data.get("before_day_id")
+    before_day = _valid_day_id(before_raw) if before_raw else day_id_for()
+    if before_raw and before_day is None:
+        raise HTTPException(status_code=400, detail="invalid_before_day_id")
+
+    store = get_transcript_store()
+    target_day = explicit_day
+    if target_day is None:
+        pending = await asyncio.to_thread(
+            store.list_pending_days,
+            before_day_id=before_day,
+            limit=1,
+        )
+        if not pending:
+            return JSONResponse({"ok": True, "pending": False, "time": utc_now()})
+        target_day = str(pending[0]["day_id"])
+
+    try:
+        frozen = await asyncio.to_thread(store.freeze_day, target_day)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=public_error_detail(exc)) from exc
+    return JSONResponse(
+        {"ok": True, "pending": True, "transcript": frozen, "time": utc_now()}
+    )
+
+
+@app.post("/internal/transcript/processed")
+async def transcript_processed(request: Request):
+    """Acknowledge a verified local NC commit and optionally purge raw rows."""
+    _require_internal_event(request)
+    try:
+        data = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid_json") from exc
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="invalid_payload")
+
+    day_id = _valid_day_id(data.get("day_id"))
+    input_hash = str(data.get("input_hash") or "").strip().lower()
+    if day_id is None or not re.fullmatch(r"[a-f0-9]{64}", input_hash):
+        raise HTTPException(status_code=400, detail="invalid_transcript_receipt")
+
+    store = get_transcript_store()
+    try:
+        receipt = await asyncio.to_thread(
+            store.acknowledge_processed,
+            day_id,
+            input_hash,
+            purge=bool(data.get("purge", True)),
+        )
+        purge_count = int(receipt.get("purged") or 0)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=public_error_detail(exc)) from exc
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "day_id": day_id,
+            "input_hash": input_hash,
+            "purged": int(purge_count),
+            "time": utc_now(),
+        }
+    )
 
 
 async def _whatsapp_turn(data: dict[str, Any]) -> dict[str, Any]:
