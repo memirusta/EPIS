@@ -227,5 +227,72 @@ class NightlyPhaseBTests(unittest.TestCase):
         self.assertEqual(report["processed_days"], [])
 
 
+    def test_stage3_accepts_plain_text_luna_response_in_one_turn(self):
+        class VoiceClient:
+            def __init__(self):
+                self.calls = []
+
+            def infer(self, *, stage, prompt):
+                self.calls.append({
+                    "stage": stage,
+                    "prompt": prompt,
+                })
+                return (
+                    "Bugun teknik tarafta belirgin ilerleme var. "
+                    "Yarin ayni odagi koruyup tek bir ana isi bitirmeye calis."
+                )
+
+        client = VoiceClient()
+        engine = self.nr.NightlyRecalculation(
+            transcript_client=client,
+            vault=self.vault,
+        )
+
+        analysis = {
+            "mood_estimate": "pozitif",
+            "energy_level": "orta",
+            "stress_signal": "dusuk",
+            "behavioral_insights": [
+                "Teknik projede istikrarli ilerleme var",
+            ],
+            "tomorrow_context": "Projeye devam",
+            "epis_learnings": [],
+        }
+
+        message, log = engine._stage3_epis_voice(
+            "Bugun proje uzerinde ilerleme kaydedildi.",
+            analysis,
+        )
+
+        self.assertTrue(message.startswith("Bugun teknik tarafta"))
+        self.assertEqual(log["turns"], 1)
+        self.assertEqual(log["chars"], len(message))
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(client.calls[0]["stage"], "voice")
+        self.assertIn(
+            "Yalnizca kullaniciya gidecek mesajin kendisini dondur",
+            client.calls[0]["prompt"],
+        )
+        self.assertNotIn(
+            '{"type":"direct"',
+            client.calls[0]["prompt"],
+        )
+
+    def test_report_uses_provider_neutral_stage_names(self):
+        client = FakeTranscriptClient(self.frozen)
+        engine = self._engine(client)
+
+        report = engine.run()
+        stages = report["stages"]
+
+        self.assertIn("stage1_summary", stages)
+        self.assertIn("stage2_analysis", stages)
+        self.assertIn("stage3_voice", stages)
+
+        self.assertNotIn("stage1_gemini", stages)
+        self.assertNotIn("stage2_claude", stages)
+        self.assertNotIn("stage3_epis", stages)
+
+
 if __name__ == "__main__":
     unittest.main()

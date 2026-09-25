@@ -27,7 +27,7 @@ HABITS_DIR   = os.path.join(EPIS_ROOT, "Layer-1", "habits")
 DB_PATH      = os.path.join(MEMORY_DIR, "lifetime.db")
 
 sys.path.insert(0, THIS_DIR)
-from router import EpisRouter
+from privacy import PrivacyFilter
 from crypto_layer import get_cipher, load_json_file
 from memory_vault import LocalMemoryVault
 from nc_transcript_client import CloudTranscriptClient
@@ -127,7 +127,7 @@ class NightlyRecalculation:
         transcript_client=None,
         vault=None,
     ):
-        self.router         = EpisRouter()
+        self.privacy        = PrivacyFilter()
         self.cipher         = get_cipher()
         self.requested_day_id = day_id or (os.getenv("EPIS_NC_DAY_ID") or "").strip() or None
         self.today          = date.fromisoformat(self.requested_day_id) if self.requested_day_id else date.today()
@@ -257,14 +257,14 @@ class NightlyRecalculation:
             self._safe_memory_evidence = "\n".join(evidence_lines)[:18000]
 
             summary, s1_log = self._stage1_summarize(safe_data)
-            self.report["stages"]["stage1_gemini"]     = f"OK ({s1_log['turns']} tur)"
+            self.report["stages"]["stage1_summary"]     = f"OK ({s1_log['turns']} tur)"
             self.report["conversation_logs"]["stage1"] = s1_log
 
             if summary.startswith("HATA"):
                 raise RuntimeError(f"Stage 1 basarisiz: {summary}")
 
             analysis_raw, s2_log = self._stage2_analyze(summary)
-            self.report["stages"]["stage2_claude"]     = f"OK ({s2_log['turns']} tur)"
+            self.report["stages"]["stage2_analysis"]     = f"OK ({s2_log['turns']} tur)"
             self.report["conversation_logs"]["stage2"] = s2_log
 
             if analysis_raw.startswith("HATA"):
@@ -278,21 +278,21 @@ class NightlyRecalculation:
                 summary,
                 analysis,
             )
-            self.report["stages"]["stage3_epis"] = (
+            self.report["stages"]["stage3_voice"] = (
                 f"OK ({s3_log.get('chars', 0)} kar.)"
                 if epis_voice
                 else "SKIP"
             )
             self.report["conversation_logs"]["stage3"] = s3_log
 
-            summary = self.router.privacy.deanonymize(
+            summary = self.privacy.deanonymize(
                 summary,
                 self._pseudonym_map,
             )
             analysis = self._deanonymize_obj(analysis)
 
             if epis_voice:
-                epis_voice = self.router.privacy.deanonymize(
+                epis_voice = self.privacy.deanonymize(
                     epis_voice,
                     self._pseudonym_map,
                 )
@@ -574,7 +574,7 @@ class NightlyRecalculation:
     def _apply_privacy(self, raw_data: dict) -> dict:
         raw_str = json.dumps(raw_data, ensure_ascii=False)
         # Anonimleştir VE geri-çevirme haritasını sakla (analiz yerelde geri çevrilecek)
-        safe_str, self._pseudonym_map = self.router.privacy.anonymize(raw_str)
+        safe_str, self._pseudonym_map = self.privacy.anonymize(raw_str)
         try:
             return json.loads(safe_str)
         except json.JSONDecodeError:
@@ -586,7 +586,7 @@ class NightlyRecalculation:
             return obj
         try:
             as_str = json.dumps(obj, ensure_ascii=False)
-            restored = self.router.privacy.deanonymize(as_str, self._pseudonym_map)
+            restored = self.privacy.deanonymize(as_str, self._pseudonym_map)
             return json.loads(restored)
         except Exception:
             return obj
@@ -799,8 +799,12 @@ YALNIZCA asagidaki JSON formatinda yanitla. Baska hicbir sey yazma.
         summary: str,
         analysis: dict,
     ) -> tuple[str, dict]:
-        """Generate the morning note through stateless production Luna."""
+        """Generate the morning note through stateless production Luna.
 
+        Luna owns the language, not the transport protocol.  Stage 3 therefore
+        requests plain text and EPIS treats the returned text as the direct
+        message payload instead of asking the model to serialize JSON.
+        """
         log = {
             "turns": 0,
             "model": "production-luna",
@@ -829,9 +833,10 @@ YALNIZCA asagidaki JSON formatinda yanitla. Baska hicbir sey yazma.
             "Kurallar:\n"
             "- Sen EPIS'sin; kullanicinin uyku/beden/olcum verisini "
             "kendi yasantin gibi sahiplenme.\n"
-            "- 2-5 cumle, samimi, kisa. Yargilama / vaaz yok.\n"
+            "- 2-5 cumle, samimi ve kisa ol. Yargilama veya vaaz yok.\n"
             "- Ne fark ettigini ve yarin icin tek bir not ekle.\n"
-            '- Yanit YALNIZCA JSON: {"type":"direct","message":"..."}'
+            "- Yalnizca kullaniciya gidecek mesajin kendisini dondur.\n"
+            "- JSON, Markdown, kod blogu, etiket veya aciklama ekleme."
         )
 
         conv = NightlyConversation(
@@ -844,37 +849,9 @@ YALNIZCA asagidaki JSON formatinda yanitla. Baska hicbir sey yazma.
             },
         )
 
-        def parse_message(raw: str) -> str:
-            clean = str(raw or "").strip()
-
-            if clean.startswith("```"):
-                lines = clean.split("\n")
-                if len(lines) > 2:
-                    clean = "\n".join(lines[1:-1])
-
-            try:
-                parsed = json.loads(clean)
-            except json.JSONDecodeError:
-                return ""
-
-            if not isinstance(parsed, dict):
-                return ""
-
-            if parsed.get("type") != "direct":
-                return ""
-
-            return str(parsed.get("message") or "").strip()
-
         try:
             response = conv.send(user_msg)
-            msg = parse_message(response)
-
-            if not msg:
-                response = conv.send(
-                    'Yanit gecersizdi. YALNIZCA gecerli JSON dondur: '
-                    '{"type":"direct","message":"2-5 cumlelik mesaj"}'
-                )
-                msg = parse_message(response)
+            msg = str(response or "").strip()
 
             log["turns"] = conv.turn
             log["chars"] = len(msg)
@@ -885,7 +862,7 @@ YALNIZCA asagidaki JSON formatinda yanitla. Baska hicbir sey yazma.
                 )
             else:
                 logger.warning(
-                    "Stage 3: bos veya gecersiz EPIS sesi"
+                    "Stage 3: bos EPIS sesi"
                 )
 
             return msg, log
@@ -1058,7 +1035,7 @@ YALNIZCA asagidaki JSON formatinda yanitla. Baska hicbir sey yazma.
 
             result = self._get_transcript_client().infer(
                 stage="analysis",
-                prompt=self.router._apply_privacy_layer(prompt),
+                prompt=self.privacy.anonymize(prompt)[0],
             )
 
             if "sapma tespit edilmedi" not in result.lower():
