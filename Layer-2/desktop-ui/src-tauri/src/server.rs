@@ -667,6 +667,8 @@ fn copy_safe_device_environment(command: &mut Command) {
         "EPIS_DEVICE_NAME",
         "EPIS_SPOTIFY_CLIENT_ID",
         "EPIS_SPOTIFY_REDIRECT_URI",
+        "EPIS_KEY_PATH",
+        "EPIS_MEMORY_VAULT_PATH",
     ] {
         if let Some(value) = env::var_os(key) {
             command.env(key, value);
