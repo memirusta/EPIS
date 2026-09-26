@@ -1310,11 +1310,15 @@ def _validate_whatsapp_outreach_reply(
             detail="invalid_payload",
         )
 
-    provider_message_ref = data.get(
+    quoted_ref = data.get(
         "provider_message_ref"
     )
 
-    provider_contact_ref = data.get(
+    incoming_ref = data.get(
+        "incoming_message_ref"
+    )
+
+    contact_ref = data.get(
         "provider_contact_ref"
     )
 
@@ -1327,27 +1331,48 @@ def _validate_whatsapp_outreach_reply(
         0.65,
     )
 
-    if (
-        not isinstance(
-            provider_message_ref,
-            str,
-        )
-        or not provider_message_ref.strip()
-        or len(provider_message_ref) > 512
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=
-                "invalid_provider_message_ref",
+    clean_quoted_ref = ""
+
+    if quoted_ref is not None:
+        if (
+            not isinstance(
+                quoted_ref,
+                str,
+            )
+            or not quoted_ref.strip()
+            or len(quoted_ref) > 512
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=
+                    "invalid_provider_message_ref",
+            )
+
+        clean_quoted_ref = (
+            quoted_ref.strip()
         )
 
     if (
         not isinstance(
-            provider_contact_ref,
+            incoming_ref,
             str,
         )
-        or not provider_contact_ref.strip()
-        or len(provider_contact_ref) > 512
+        or not incoming_ref.strip()
+        or len(incoming_ref) > 512
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=
+                "invalid_incoming_message_ref",
+        )
+
+    if (
+        not isinstance(
+            contact_ref,
+            str,
+        )
+        or not contact_ref.strip()
+        or len(contact_ref) > 512
     ):
         raise HTTPException(
             status_code=400,
@@ -1375,7 +1400,9 @@ def _validate_whatsapp_outreach_reply(
             int,
             float,
         )
-        or not 0 <= float(confidence) <= 1
+        or not 0
+        <= float(confidence)
+        <= 1
     ):
         raise HTTPException(
             status_code=400,
@@ -1383,20 +1410,23 @@ def _validate_whatsapp_outreach_reply(
                 "invalid_confidence",
         )
 
-    return {
-        "provider_message_ref":
-            provider_message_ref.strip(),
-
+    result = {
+        "incoming_message_ref":
+            incoming_ref.strip(),
         "provider_contact_ref":
-            provider_contact_ref.strip(),
-
+            contact_ref.strip(),
         "content":
             content.strip(),
-
         "confidence":
             float(confidence),
     }
 
+    if clean_quoted_ref:
+        result[
+            "provider_message_ref"
+        ] = clean_quoted_ref
+
+    return result
 
 def _whatsapp_outreach_reply_transports(
     core,
@@ -1471,12 +1501,16 @@ async def _route_whatsapp_outreach_reply(
                 "whatsapp_reply_device_ambiguous",
         )
 
-    # Deterministic command ID makes webhook retries safe even
-    # if the cloud temporarily loses the device response after
-    # local execution. DeviceWorker's receipt cache owns replay.
-    command_material = (
-        arguments[
-            "provider_message_ref"
+    material = (
+        str(
+            arguments.get(
+                "provider_message_ref"
+            )
+            or ""
+        )
+        + "\0"
+        + arguments[
+            "incoming_message_ref"
         ]
         + "\0"
         + arguments[
@@ -1493,16 +1527,14 @@ async def _route_whatsapp_outreach_reply(
     request_id = (
         "wa-reply-"
         + hashlib.sha256(
-            command_material.encode(
+            material.encode(
                 "utf-8"
             )
         ).hexdigest()[:40]
     )
 
-    transport = candidates[0]
-
     result = await asyncio.to_thread(
-        transport.execute,
+        candidates[0].execute,
         WHATSAPP_DEVICE_REPLY_CAPABILITY,
         arguments,
         confirmed=True,
@@ -1520,8 +1552,6 @@ async def _route_whatsapp_outreach_reply(
         )
 
     if result.get("ok") is not True:
-        # A deterministic request ID means a retry cannot silently
-        # create a second local side effect.
         raise HTTPException(
             status_code=503,
             detail=str(
@@ -1533,17 +1563,14 @@ async def _route_whatsapp_outreach_reply(
             )[:200],
         )
 
-    status = str(
-        result.get("status")
-        or ""
-    )
-
     safe = {
         "ok": True,
-        "status": status,
+        "status": str(
+            result.get("status")
+            or ""
+        ),
     }
 
-    # outreach_id is opaque and useful to the bridge for logging.
     outreach_id = result.get(
         "outreach_id"
     )
@@ -1559,14 +1586,23 @@ async def _route_whatsapp_outreach_reply(
             "outreach_id"
         ] = outreach_id
 
-    # Deliberately do NOT echo:
-    # - provider_contact_ref
-    # - provider_message_ref
-    # - reply content
-    # - person_id
-    # - memory_id
-    return safe
+    candidate_count = result.get(
+        "candidate_count"
+    )
 
+    if (
+        safe["status"]
+        == "ambiguous"
+        and isinstance(
+            candidate_count,
+            int,
+        )
+    ):
+        safe[
+            "candidate_count"
+        ] = candidate_count
+
+    return safe
 
 @app.post(
     "/internal/whatsapp/outreach-reply"

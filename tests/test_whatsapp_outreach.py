@@ -629,6 +629,175 @@ class WhatsappOutreachTests(
             [],
         )
 
+    def test_unquoted_reply_uses_single_recent_pending_outreach(
+        self,
+    ):
+        self.add_person(
+            "Merve",
+            provider_ref=
+                "contact:merve",
+        )
+
+        provider, _ = (
+            self.provider()
+        )
+
+        sent = provider.execute(
+            "whatsapp.send_to_contact",
+            {
+                "contact_ref":
+                    "Merve",
+                "message":
+                    "Bir şey soracağım.",
+            },
+        )
+
+        state = VaultOutreachState(
+            self.vault
+        )
+
+        result = (
+            state.accept_reply_by_contact(
+                incoming_message_ref=
+                    "incoming-1",
+                provider_contact_ref=
+                    "contact:merve",
+                content=
+                    "Bence gayet iyi.",
+            )
+        )
+
+        self.assertEqual(
+            result["status"],
+            "accepted",
+        )
+
+        self.assertEqual(
+            result["outreach_id"],
+            sent["outreach_id"],
+        )
+
+    def test_unquoted_reply_is_ambiguous_with_two_pending_outreaches(
+        self,
+    ):
+        self.add_person(
+            "Merve",
+            provider_ref=
+                "contact:merve-amb",
+        )
+
+        provider, _ = (
+            self.provider()
+        )
+
+        provider.execute(
+            "whatsapp.send_to_contact",
+            {
+                "contact_ref":
+                    "Merve",
+                "message":
+                    "Birinci soru",
+            },
+        )
+
+        provider.execute(
+            "whatsapp.send_to_contact",
+            {
+                "contact_ref":
+                    "Merve",
+                "message":
+                    "İkinci soru",
+            },
+        )
+
+        state = VaultOutreachState(
+            self.vault
+        )
+
+        result = (
+            state.accept_reply_by_contact(
+                incoming_message_ref=
+                    "incoming-amb",
+                provider_contact_ref=
+                    "contact:merve-amb",
+                content=
+                    "Evet.",
+            )
+        )
+
+        self.assertEqual(
+            result["status"],
+            "ambiguous",
+        )
+
+        self.assertEqual(
+            result["candidate_count"],
+            2,
+        )
+
+    def test_unquoted_reply_is_idempotent(
+        self,
+    ):
+        self.add_person(
+            "Merve",
+            provider_ref=
+                "contact:merve-idem",
+        )
+
+        provider, _ = (
+            self.provider()
+        )
+
+        provider.execute(
+            "whatsapp.send_to_contact",
+            {
+                "contact_ref":
+                    "Merve",
+                "message":
+                    "Nasılsın?",
+            },
+        )
+
+        state = VaultOutreachState(
+            self.vault
+        )
+
+        kwargs = {
+            "incoming_message_ref":
+                "incoming-same",
+            "provider_contact_ref":
+                "contact:merve-idem",
+            "content":
+                "İyiyim.",
+        }
+
+        first = (
+            state.accept_reply_by_contact(
+                **kwargs
+            )
+        )
+
+        second = (
+            state.accept_reply_by_contact(
+                **kwargs
+            )
+        )
+
+        self.assertEqual(
+            first["status"],
+            "accepted",
+        )
+
+        self.assertEqual(
+            second["status"],
+            "duplicate",
+        )
+
+        self.assertEqual(
+            first["memory_id"],
+            second["memory_id"],
+        )
+
     def test_external_perspective_confidence_is_capped(
         self,
     ):

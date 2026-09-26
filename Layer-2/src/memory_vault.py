@@ -243,6 +243,19 @@ class LocalMemoryVault:
                 )
                 WHERE provider_message_fingerprint IS NOT NULL;
 
+                CREATE TABLE IF NOT EXISTS external_outreach_reply_receipts (
+                    provider TEXT NOT NULL,
+                    inbound_message_fingerprint TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    outreach_id TEXT,
+                    memory_id TEXT,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(
+                        provider,
+                        inbound_message_fingerprint
+                    )
+                );
+
                 CREATE TABLE IF NOT EXISTS memory_changes (
                     id TEXT PRIMARY KEY,
                     day_id TEXT,
@@ -760,6 +773,279 @@ class LocalMemoryVault:
                 ),
             )
         return person_id
+
+    def configure_person_whatsapp(
+        self,
+        name: str,
+        *,
+        contact_ref: str,
+        aliases: list[str] | None = None,
+        allowlisted: bool = True,
+    ) -> dict[str, Any]:
+        """Merge private WhatsApp routing metadata into one person.
+
+        Existing notes, confidence, provenance metadata and unrelated
+        metadata keys are preserved.
+        """
+
+        clean_name = str(
+            name or ""
+        ).strip()
+
+        clean_contact_ref = str(
+            contact_ref or ""
+        ).strip()
+
+        if not clean_name:
+            raise ValueError(
+                "person_name_required"
+            )
+
+        if not clean_contact_ref:
+            raise ValueError(
+                "contact_ref_required"
+            )
+
+        clean_aliases = []
+
+        seen_aliases = set()
+
+        for raw in aliases or []:
+            alias = str(
+                raw or ""
+            ).strip()
+
+            key = alias.casefold()
+
+            if (
+                not alias
+                or key in seen_aliases
+                or key
+                == clean_name.casefold()
+            ):
+                continue
+
+            seen_aliases.add(
+                key
+            )
+
+            clean_aliases.append(
+                alias
+            )
+
+        fingerprint = hashlib.sha256(
+            clean_name.casefold().encode(
+                "utf-8"
+            )
+        ).hexdigest()
+
+        now = _utc_now()
+
+        previous_contact_ref = ""
+
+        with self._lock, self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    id,
+                    aliases_enc,
+                    metadata_json
+                FROM people
+                WHERE name_fingerprint=?
+                """,
+                (
+                    fingerprint,
+                ),
+            ).fetchone()
+
+            if row is None:
+                person_id = (
+                    uuid.uuid4().hex
+                )
+
+                metadata = {
+                    "whatsapp": {
+                        "allowlisted":
+                            bool(
+                                allowlisted
+                            ),
+
+                        "contact_ref":
+                            clean_contact_ref,
+                    }
+                }
+
+                conn.execute(
+                    """
+                    INSERT INTO people(
+                        id,
+                        canonical_name_enc,
+                        name_fingerprint,
+                        aliases_enc,
+                        notes_enc,
+                        confidence,
+                        metadata_json,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES(
+                        ?,
+                        ?,
+                        ?,
+                        ?,
+                        ?,
+                        1.0,
+                        ?,
+                        ?,
+                        ?
+                    )
+                    """,
+                    (
+                        person_id,
+                        self._enc(
+                            clean_name
+                        ),
+                        fingerprint,
+                        self._enc(
+                            clean_aliases
+                        ),
+                        self._enc(""),
+                        _json(metadata),
+                        now,
+                        now,
+                    ),
+                )
+
+            else:
+                person_id = str(
+                    row["id"]
+                )
+
+                try:
+                    existing_aliases = (
+                        json.loads(
+                            self._dec(
+                                row[
+                                    "aliases_enc"
+                                ]
+                            )
+                            or "[]"
+                        )
+                    )
+                except Exception:
+                    existing_aliases = []
+
+                if not isinstance(
+                    existing_aliases,
+                    list,
+                ):
+                    existing_aliases = []
+
+                merged_aliases = []
+                merged_seen = set()
+
+                for raw in [
+                    *existing_aliases,
+                    *clean_aliases,
+                ]:
+                    alias = str(
+                        raw or ""
+                    ).strip()
+
+                    key = alias.casefold()
+
+                    if (
+                        not alias
+                        or key
+                        in merged_seen
+                        or key
+                        == clean_name.casefold()
+                    ):
+                        continue
+
+                    merged_seen.add(
+                        key
+                    )
+
+                    merged_aliases.append(
+                        alias
+                    )
+
+                try:
+                    metadata = json.loads(
+                        row[
+                            "metadata_json"
+                        ]
+                        or "{}"
+                    )
+                except Exception:
+                    metadata = {}
+
+                if not isinstance(
+                    metadata,
+                    dict,
+                ):
+                    metadata = {}
+
+                old_whatsapp = metadata.get(
+                    "whatsapp"
+                )
+
+                if isinstance(
+                    old_whatsapp,
+                    dict,
+                ):
+                    previous_contact_ref = str(
+                        old_whatsapp.get(
+                            "contact_ref"
+                        )
+                        or ""
+                    ).strip()
+
+                metadata["whatsapp"] = {
+                    "allowlisted":
+                        bool(
+                            allowlisted
+                        ),
+
+                    "contact_ref":
+                        clean_contact_ref,
+                }
+
+                conn.execute(
+                    """
+                    UPDATE people
+                    SET
+                        aliases_enc=?,
+                        metadata_json=?,
+                        updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        self._enc(
+                            merged_aliases
+                        ),
+                        _json(metadata),
+                        now,
+                        person_id,
+                    ),
+                )
+
+        return {
+            "person_id":
+                person_id,
+
+            "contact_ref":
+                clean_contact_ref,
+
+            "previous_contact_ref":
+                previous_contact_ref,
+
+            "allowlisted":
+                bool(
+                    allowlisted
+                ),
+        }
 
     def list_people(self, *, limit: int = 200) -> dict[str, Any]:
         with self._lock, self._connection() as conn:
@@ -1284,6 +1570,271 @@ class LocalMemoryVault:
             "user_authoritative":
                 False,
         }
+
+    def accept_external_outreach_reply_by_contact(
+        self,
+        *,
+        incoming_message_ref: str,
+        provider_contact_ref: str,
+        content: str,
+        provider: str = "whatsapp",
+        confidence: float = 0.65,
+        max_age_hours: int = 24,
+    ) -> dict[str, Any]:
+        clean_provider = str(
+            provider or ""
+        ).strip()
+
+        clean_incoming_ref = str(
+            incoming_message_ref or ""
+        ).strip()
+
+        clean_contact_ref = str(
+            provider_contact_ref or ""
+        ).strip()
+
+        clean_content = str(
+            content or ""
+        ).strip()
+
+        if (
+            not clean_provider
+            or not clean_incoming_ref
+            or not clean_contact_ref
+        ):
+            return {
+                "status": "unmatched",
+            }
+
+        if not clean_content:
+            return {
+                "status": "empty_reply",
+            }
+
+        hours = max(
+            1,
+            min(
+                int(max_age_hours),
+                168,
+            ),
+        )
+
+        inbound_fingerprint = hashlib.sha256(
+            (
+                clean_provider
+                + "\0inbound\0"
+                + clean_incoming_ref
+            ).encode("utf-8")
+        ).hexdigest()
+
+        with self._lock:
+            with self._connection() as conn:
+                receipt = conn.execute(
+                    """
+                    SELECT
+                        status,
+                        outreach_id,
+                        memory_id
+                    FROM external_outreach_reply_receipts
+                    WHERE
+                        provider=?
+                        AND inbound_message_fingerprint=?
+                    """,
+                    (
+                        clean_provider,
+                        inbound_fingerprint,
+                    ),
+                ).fetchone()
+
+            if receipt is not None:
+                status = str(
+                    receipt["status"]
+                    or ""
+                )
+
+                if status == "accepted":
+                    return {
+                        "status": "duplicate",
+                        "outreach_id": str(
+                            receipt["outreach_id"]
+                            or ""
+                        ),
+                        "memory_id": str(
+                            receipt["memory_id"]
+                            or ""
+                        ),
+                    }
+
+                if status == "ambiguous":
+                    return {
+                        "status": "ambiguous",
+                    }
+
+            with self._connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        outreach_id,
+                        provider_contact_ref_enc,
+                        provider_message_ref_enc
+                    FROM external_outreach
+                    WHERE
+                        provider=?
+                        AND status='sent'
+                        AND julianday(created_at)
+                            >= julianday(
+                                'now',
+                                ?
+                            )
+                    ORDER BY created_at DESC
+                    """,
+                    (
+                        clean_provider,
+                        f"-{hours} hours",
+                    ),
+                ).fetchall()
+
+            matches = []
+
+            for row in rows:
+                expected = self._dec(
+                    row[
+                        "provider_contact_ref_enc"
+                    ]
+                )
+
+                if expected == clean_contact_ref:
+                    matches.append(row)
+
+            if not matches:
+                return {
+                    "status": "unmatched",
+                }
+
+            if len(matches) > 1:
+                with self._connection() as conn:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO
+                            external_outreach_reply_receipts(
+                                provider,
+                                inbound_message_fingerprint,
+                                status,
+                                created_at
+                            )
+                        VALUES(
+                            ?,
+                            ?,
+                            'ambiguous',
+                            ?
+                        )
+                        """,
+                        (
+                            clean_provider,
+                            inbound_fingerprint,
+                            _utc_now(),
+                        ),
+                    )
+
+                return {
+                    "status": "ambiguous",
+                    "candidate_count":
+                        len(matches),
+                }
+
+            selected = matches[0]
+
+            provider_message_ref = self._dec(
+                selected[
+                    "provider_message_ref_enc"
+                ]
+            )
+
+            if not provider_message_ref:
+                return {
+                    "status": "unmatched",
+                }
+
+            result = (
+                self.accept_external_outreach_reply(
+                    provider_message_ref=
+                        provider_message_ref,
+                    provider_contact_ref=
+                        clean_contact_ref,
+                    content=
+                        clean_content,
+                    provider=
+                        clean_provider,
+                    confidence=
+                        confidence,
+                )
+            )
+
+            if (
+                result.get("status")
+                in {
+                    "accepted",
+                    "duplicate",
+                }
+            ):
+                outreach_id = str(
+                    result.get(
+                        "outreach_id"
+                    )
+                    or selected[
+                        "outreach_id"
+                    ]
+                    or ""
+                )
+
+                memory_id = str(
+                    result.get(
+                        "memory_id"
+                    )
+                    or ""
+                )
+
+                with self._connection() as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO
+                            external_outreach_reply_receipts(
+                                provider,
+                                inbound_message_fingerprint,
+                                status,
+                                outreach_id,
+                                memory_id,
+                                created_at
+                            )
+                        VALUES(
+                            ?,
+                            ?,
+                            'accepted',
+                            ?,
+                            ?,
+                            ?
+                        )
+                        ON CONFLICT(
+                            provider,
+                            inbound_message_fingerprint
+                        )
+                        DO UPDATE SET
+                            status='accepted',
+                            outreach_id=
+                                excluded.outreach_id,
+                            memory_id=
+                                excluded.memory_id
+                        """,
+                        (
+                            clean_provider,
+                            inbound_fingerprint,
+                            outreach_id,
+                            memory_id,
+                            _utc_now(),
+                        ),
+                    )
+
+            return result
 
     def resolve_contact_ref(
         self,

@@ -185,6 +185,9 @@ class WhatsappOutreachIngressTests(
             "provider_message_ref":
                 "msg-private-123",
 
+            "incoming_message_ref":
+                "incoming-private-789",
+
             "provider_contact_ref":
                 "contact-private-456",
 

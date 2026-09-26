@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Protocol
+import os
+from pathlib import Path
+from urllib.parse import urlsplit
 import uuid
+
+import requests
 
 
 class ContactResolver(Protocol):
@@ -178,6 +183,607 @@ class VaultOutreachState:
                 confidence=
                     confidence,
 
+                provider=
+                    "whatsapp",
+            )
+        )
+
+    def accept_reply_by_contact(
+        self,
+        *,
+        incoming_message_ref: str,
+        provider_contact_ref: str,
+        content: str,
+        confidence: float = 0.65,
+    ) -> dict:
+        return (
+            self.vault
+            .accept_external_outreach_reply_by_contact(
+                incoming_message_ref=
+                    incoming_message_ref,
+
+                provider_contact_ref=
+                    provider_contact_ref,
+
+                content=
+                    content,
+
+                confidence=
+                    confidence,
+
+                provider=
+                    "whatsapp",
+            )
+        )
+
+
+
+_WHATSAPP_BRIDGE_CONFIG_KEYS = frozenset({
+    "EPIS_WHATSAPP_BRIDGE_URL",
+    "EPIS_WHATSAPP_BRIDGE_TOKEN",
+})
+
+
+def default_whatsapp_bridge_config_path() -> Path:
+    override = str(
+        os.getenv(
+            "EPIS_WHATSAPP_BRIDGE_CONFIG"
+        )
+        or ""
+    ).strip()
+
+    if override:
+        return (
+            Path(override)
+            .expanduser()
+            .resolve()
+        )
+
+    base = Path(
+        os.getenv("LOCALAPPDATA")
+        or Path.home()
+    )
+
+    return (
+        base
+        / "EPIS"
+        / "whatsapp-bridge.env"
+    )
+
+
+def load_whatsapp_bridge_config() -> dict[str, str]:
+    """Load only the two values Python needs.
+
+    The same private file may contain Heroku ingress credentials used by
+    the Node process; those values are intentionally never imported into
+    the Python device-agent environment here.
+    """
+
+    values: dict[str, str] = {}
+
+    path = (
+        default_whatsapp_bridge_config_path()
+    )
+
+    try:
+        lines = path.read_text(
+            encoding="utf-8"
+        ).splitlines()
+    except OSError:
+        lines = []
+
+    for raw in lines:
+        line = raw.strip()
+
+        if (
+            not line
+            or line.startswith("#")
+            or "=" not in line
+        ):
+            continue
+
+        key, value = line.split(
+            "=",
+            1,
+        )
+
+        key = key.strip()
+
+        if (
+            key
+            in _WHATSAPP_BRIDGE_CONFIG_KEYS
+        ):
+            values[key] = (
+                value.strip()
+            )
+
+    # Explicit process env always wins.
+    for key in (
+        _WHATSAPP_BRIDGE_CONFIG_KEYS
+    ):
+        value = str(
+            os.getenv(key)
+            or ""
+        ).strip()
+
+        if value:
+            values[key] = value
+
+    return values
+
+
+class LocalWhatsappBridge:
+    """Authenticated fixed localhost adapter for the Baileys process."""
+
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        *,
+        timeout: float = 5.0,
+    ):
+        parsed = urlsplit(
+            str(base_url or "").strip()
+        )
+
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname
+            != "127.0.0.1"
+            or parsed.port is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {
+                "",
+                "/",
+            }
+        ):
+            raise ValueError(
+                "whatsapp_bridge_must_be_loopback_http"
+            )
+
+        clean_token = str(
+            token or ""
+        ).strip()
+
+        if len(clean_token) < 32:
+            raise ValueError(
+                "whatsapp_bridge_token_too_short"
+            )
+
+        self.base_url = (
+            "http://127.0.0.1:"
+            + str(parsed.port)
+        )
+
+        self.token = clean_token
+        self.timeout = float(timeout)
+
+    @property
+    def _headers(
+        self,
+    ) -> dict[str, str]:
+        return {
+            "Authorization":
+                "Bearer "
+                + self.token,
+
+            "Content-Type":
+                "application/json",
+        }
+
+    def _json_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: dict | None = None,
+    ) -> tuple[int, dict]:
+        response = requests.request(
+            method,
+            self.base_url + path,
+            headers=self._headers,
+            json=body,
+            timeout=self.timeout,
+        )
+
+        try:
+            payload = response.json()
+        except Exception:
+            payload = {}
+
+        if not isinstance(
+            payload,
+            dict,
+        ):
+            payload = {}
+
+        return (
+            int(
+                response.status_code
+            ),
+            payload,
+        )
+
+    def available(
+        self,
+    ) -> bool:
+        try:
+            status, payload = (
+                self._json_request(
+                    "GET",
+                    "/health",
+                )
+            )
+        except Exception:
+            return False
+
+        return bool(
+            status == 200
+            and payload.get("ok")
+            is True
+            and payload.get(
+                "whatsapp_connected"
+            )
+            is True
+        )
+
+    def enroll_contact(
+        self,
+        contact_ref: str,
+        phone_number: str,
+    ) -> dict:
+        try:
+            status, payload = (
+                self._json_request(
+                    "POST",
+                    "/contacts/enroll",
+                    body={
+                        "contact_ref":
+                            str(
+                                contact_ref
+                            ),
+
+                        "phone_number":
+                            str(
+                                phone_number
+                            ),
+                    },
+                )
+            )
+        except Exception:
+            return {
+                "ok": False,
+                "error":
+                    "whatsapp_bridge_unreachable",
+            }
+
+        if status >= 400:
+            return {
+                "ok": False,
+                "error": str(
+                    payload.get(
+                        "error"
+                    )
+                    or
+                    (
+                        "whatsapp_bridge_http_"
+                        + str(status)
+                    )
+                )[:160],
+            }
+
+        if payload.get("ok") is not True:
+            return {
+                "ok": False,
+                "error": str(
+                    payload.get(
+                        "error"
+                    )
+                    or
+                    "contact_enrollment_failed"
+                )[:160],
+            }
+
+        # Never return the resolved JID/phone.
+        return {
+            "ok": True,
+            "status": str(
+                payload.get(
+                    "status"
+                )
+                or "enrolled"
+            ),
+            "contact_ref": str(
+                payload.get(
+                    "contact_ref"
+                )
+                or contact_ref
+            ),
+        }
+
+    def remove_contact(
+        self,
+        contact_ref: str,
+    ) -> dict:
+        try:
+            status, payload = (
+                self._json_request(
+                    "POST",
+                    "/contacts/remove",
+                    body={
+                        "contact_ref":
+                            str(
+                                contact_ref
+                            ),
+                    },
+                )
+            )
+        except Exception:
+            return {
+                "ok": False,
+                "error":
+                    "whatsapp_bridge_unreachable",
+            }
+
+        if status >= 400:
+            return {
+                "ok": False,
+                "error": str(
+                    payload.get(
+                        "error"
+                    )
+                    or
+                    (
+                        "whatsapp_bridge_http_"
+                        + str(status)
+                    )
+                )[:160],
+            }
+
+        return {
+            "ok":
+                payload.get("ok")
+                is True,
+
+            "status": str(
+                payload.get(
+                    "status"
+                )
+                or "removed"
+            ),
+        }
+
+    def send(
+        self,
+        provider_contact_ref: str,
+        message: str,
+        *,
+        outreach_id: str,
+    ) -> dict:
+        try:
+            status, payload = (
+                self._json_request(
+                    "POST",
+                    "/send",
+                    body={
+                        "contact_ref":
+                            str(
+                                provider_contact_ref
+                            ),
+
+                        "message":
+                            str(message),
+
+                        "outreach_id":
+                            str(outreach_id),
+                    },
+                )
+            )
+        except Exception:
+            return {
+                "ok": False,
+                "error":
+                    "whatsapp_bridge_unreachable",
+            }
+
+        if status >= 400:
+            error = str(
+                payload.get(
+                    "error"
+                )
+                or ""
+            ).strip()
+
+            # Disclosure-policy failures are intentionally safe to
+            # surface toward EPIS so it can rewrite its own message.
+            # Arbitrary bridge HTTP errors remain opaque.
+            if error in {
+                "recipient_identity_context_missing",
+                "recipient_identity_deception",
+            }:
+                result = {
+                    "ok": False,
+                    "error":
+                        error,
+                }
+
+                if type(
+                    payload.get(
+                        "retryable"
+                    )
+                ) is bool:
+                    result["retryable"] = (
+                        payload[
+                            "retryable"
+                        ]
+                    )
+
+                required = (
+                    payload.get(
+                        "required"
+                    )
+                )
+
+                if isinstance(
+                    required,
+                    list,
+                ):
+                    safe_required = [
+                        item
+                        for item in required
+                        if item in {
+                            "ai_identity",
+                            "emir_context",
+                        }
+                    ]
+
+                    if safe_required:
+                        result["required"] = (
+                            safe_required
+                        )
+
+                return result
+
+            return {
+                "ok": False,
+                "error":
+                    "whatsapp_bridge_http_"
+                    + str(status),
+            }
+
+        if payload.get("ok") is not True:
+            return {
+                "ok": False,
+                "error":
+                    str(
+                        payload.get(
+                            "error"
+                        )
+                        or
+                        "whatsapp_bridge_failed"
+                    )[:160],
+            }
+
+        provider_message_ref = str(
+            payload.get(
+                "provider_message_ref"
+            )
+            or ""
+        ).strip()
+
+        if not provider_message_ref:
+            return {
+                "ok": False,
+                "error":
+                    "provider_message_ref_missing",
+            }
+
+        # Explicit safe output allowlist.
+        return {
+            "ok": True,
+            "status": str(
+                payload.get("status")
+                or "sent"
+            ),
+            "provider_message_ref":
+                provider_message_ref,
+        }
+
+    def close(
+        self,
+    ) -> None:
+        return None
+
+
+def configure_whatsapp_device_runtime_from_env(
+    *,
+    vault=None,
+) -> bool:
+    """Wire the private local controller from the dedicated config file."""
+
+    config = (
+        load_whatsapp_bridge_config()
+    )
+
+    base_url = str(
+        config.get(
+            "EPIS_WHATSAPP_BRIDGE_URL"
+        )
+        or ""
+    ).strip()
+
+    token = str(
+        config.get(
+            "EPIS_WHATSAPP_BRIDGE_TOKEN"
+        )
+        or ""
+    ).strip()
+
+    if not base_url or not token:
+        configure_default_whatsapp_device_controller(
+            None
+        )
+
+        return False
+
+    try:
+        bridge = LocalWhatsappBridge(
+            base_url,
+            token,
+        )
+
+        if vault is None:
+            from memory_vault import (
+                LocalMemoryVault,
+            )
+
+            vault = (
+                LocalMemoryVault()
+            )
+
+        controller = (
+            WhatsappDeviceController(
+                vault,
+                bridge,
+            )
+        )
+
+    except Exception:
+        configure_default_whatsapp_device_controller(
+            None
+        )
+
+        return False
+
+    configure_default_whatsapp_device_controller(
+        controller
+    )
+
+    return True
+
+
+    def accept_reply_by_contact(
+        self,
+        *,
+        incoming_message_ref: str,
+        provider_contact_ref: str,
+        content: str,
+        confidence: float = 0.65,
+    ) -> dict:
+        return (
+            self.vault
+            .accept_external_outreach_reply_by_contact(
+                incoming_message_ref=
+                    incoming_message_ref,
+                provider_contact_ref=
+                    provider_contact_ref,
+                content=
+                    content,
+                confidence=
+                    confidence,
                 provider=
                     "whatsapp",
             )
@@ -469,11 +1075,48 @@ class WhatsappOutreachProvider:
                     error,
             )
 
-            return {
+            result = {
                 "ok": False,
                 "error":
                     error,
             }
+
+            if type(
+                transport_result.get(
+                    "retryable"
+                )
+            ) is bool:
+                result["retryable"] = (
+                    transport_result[
+                        "retryable"
+                    ]
+                )
+
+            required = (
+                transport_result.get(
+                    "required"
+                )
+            )
+
+            if isinstance(
+                required,
+                list,
+            ):
+                safe_required = [
+                    item
+                    for item in required
+                    if item in {
+                        "ai_identity",
+                        "emir_context",
+                    }
+                ]
+
+                if safe_required:
+                    result["required"] = (
+                        safe_required
+                    )
+
+            return result
 
         provider_message_ref = str(
             transport_result.get(
@@ -693,45 +1336,73 @@ class WhatsappDeviceController:
         self,
         arguments: dict,
     ) -> dict:
-        result = (
-            self.state.accept_reply(
-                provider_message_ref=str(
-                    arguments.get(
-                        "provider_message_ref"
-                    )
-                    or ""
-                ),
+        quoted_ref = str(
+            arguments.get(
+                "provider_message_ref"
+            )
+            or ""
+        ).strip()
 
-                provider_contact_ref=str(
-                    arguments.get(
-                        "provider_contact_ref"
-                    )
-                    or ""
-                ),
+        incoming_ref = str(
+            arguments.get(
+                "incoming_message_ref"
+            )
+            or ""
+        ).strip()
 
-                content=str(
-                    arguments.get(
-                        "content"
-                    )
-                    or ""
-                ),
+        contact_ref = str(
+            arguments.get(
+                "provider_contact_ref"
+            )
+            or ""
+        ).strip()
 
-                confidence=float(
-                    arguments.get(
-                        "confidence",
-                        0.65,
-                    )
-                ),
+        content = str(
+            arguments.get(
+                "content"
+            )
+            or ""
+        ).strip()
+
+        confidence = float(
+            arguments.get(
+                "confidence",
+                0.65,
             )
         )
 
-        # Correlation statuses are handled outcomes, including
-        # unmatched/duplicate/mismatch. None automatically retry.
+        if quoted_ref:
+            result = (
+                self.state.accept_reply(
+                    provider_message_ref=
+                        quoted_ref,
+                    provider_contact_ref=
+                        contact_ref,
+                    content=
+                        content,
+                    confidence=
+                        confidence,
+                )
+            )
+        else:
+            result = (
+                self.state
+                .accept_reply_by_contact(
+                    incoming_message_ref=
+                        incoming_ref,
+                    provider_contact_ref=
+                        contact_ref,
+                    content=
+                        content,
+                    confidence=
+                        confidence,
+                )
+            )
+
         return {
             "ok": True,
             **result,
         }
-
 
 def register_whatsapp_device_tools(
     registry,
@@ -775,14 +1446,22 @@ def register_whatsapp_device_tools(
         "properties": {
             "provider_message_ref": {
                 "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+            },
+            "incoming_message_ref": {
+                "type": "string",
+                "minLength": 1,
                 "maxLength": 512,
             },
             "provider_contact_ref": {
                 "type": "string",
+                "minLength": 1,
                 "maxLength": 512,
             },
             "content": {
                 "type": "string",
+                "minLength": 1,
                 "maxLength": 12000,
             },
             "confidence": {
@@ -792,7 +1471,7 @@ def register_whatsapp_device_tools(
             },
         },
         "required": [
-            "provider_message_ref",
+            "incoming_message_ref",
             "provider_contact_ref",
             "content",
         ],
