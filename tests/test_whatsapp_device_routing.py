@@ -352,6 +352,134 @@ class WhatsappDeviceRoutingTests(
             repr(result),
         )
 
+    def test_cloud_provider_preserves_disclosure_retry_contract(
+        self,
+    ):
+        transport = FakeTransport(
+            {
+                WHATSAPP_DEVICE_SEND_CAPABILITY,
+            },
+            result={
+                "ok": False,
+                "error":
+                    "recipient_identity_context_missing",
+
+                "retryable":
+                    True,
+
+                "required": [
+                    "ai_identity",
+                    "emir_context",
+                    "malicious_extra_field",
+                ],
+
+                "provider_message_ref":
+                    "MUST_NOT_ESCAPE",
+
+                "jid":
+                    "MUST_NOT_ESCAPE",
+            },
+        )
+
+        provider = (
+            CoreWhatsappOutreachProvider(
+                FakeCore([
+                    transport,
+                ])
+            )
+        )
+
+        result = provider.execute(
+            "whatsapp.send_to_contact",
+            {
+                "contact_ref":
+                    "Ayse",
+
+                "message":
+                    "Selam",
+            },
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "ok": False,
+                "error":
+                    "recipient_identity_context_missing",
+
+                "retryable":
+                    True,
+
+                "required": [
+                    "ai_identity",
+                    "emir_context",
+                ],
+            },
+        )
+
+        self.assertNotIn(
+            "provider_message_ref",
+            result,
+        )
+
+        self.assertNotIn(
+            "jid",
+            result,
+        )
+
+        self.assertNotIn(
+            "malicious_extra_field",
+            repr(result),
+        )
+
+    def test_cloud_provider_preserves_hard_deception_denial(
+        self,
+    ):
+        transport = FakeTransport(
+            {
+                WHATSAPP_DEVICE_SEND_CAPABILITY,
+            },
+            result={
+                "ok": False,
+                "error":
+                    "recipient_identity_deception",
+
+                "retryable":
+                    False,
+            },
+        )
+
+        provider = (
+            CoreWhatsappOutreachProvider(
+                FakeCore([
+                    transport,
+                ])
+            )
+        )
+
+        result = provider.execute(
+            "whatsapp.send_to_contact",
+            {
+                "contact_ref":
+                    "Ayse",
+
+                "message":
+                    "Ben Emir'im.",
+            },
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "ok": False,
+                "error":
+                    "recipient_identity_deception",
+
+                "retryable":
+                    False,
+            },
+        )
+
     def test_multiple_whatsapp_devices_fail_closed(
         self,
     ):

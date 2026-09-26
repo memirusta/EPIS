@@ -16,6 +16,9 @@ from urllib.parse import urlsplit, urlunsplit
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agentic.device_worker import DeviceWorker
+from agentic.whatsapp_outreach import (
+    configure_whatsapp_device_runtime_from_env,
+)
 
 
 logger = logging.getLogger("EPIS.DEVICE")
@@ -128,6 +131,19 @@ async def run_once(url: str, token: str, worker: DeviceWorker) -> None:
 
 
 async def run_forever(url: str, token: str) -> None:
+    whatsapp_configured = (
+        configure_whatsapp_device_runtime_from_env()
+    )
+
+    if whatsapp_configured:
+        logger.info(
+            "Private WhatsApp localhost bridge configured"
+        )
+
+    # DeviceWorker evaluates bridge health while building its
+    # advertised capability manifest. If the Baileys bridge is
+    # not connected yet, WhatsApp stays fail-closed until this
+    # device agent is restarted.
     worker = DeviceWorker()
     delay = 1.0
     while True:

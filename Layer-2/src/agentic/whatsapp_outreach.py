@@ -1648,14 +1648,59 @@ class CoreWhatsappOutreachProvider:
             }
 
         if result.get("ok") is not True:
-            return {
+            error = str(
+                result.get("error")
+                or
+                "whatsapp_device_failed"
+            )
+
+            safe = {
                 "ok": False,
-                "error": str(
-                    result.get("error")
-                    or
-                    "whatsapp_device_failed"
-                ),
+                "error": error,
             }
+
+            # Only the disclosure policy's deterministic retry
+            # contract may cross the trusted-device boundary.
+            if error in {
+                "recipient_identity_context_missing",
+                "recipient_identity_deception",
+            }:
+                if type(
+                    result.get(
+                        "retryable"
+                    )
+                ) is bool:
+                    safe["retryable"] = (
+                        result[
+                            "retryable"
+                        ]
+                    )
+
+                required = (
+                    result.get(
+                        "required"
+                    )
+                )
+
+                if isinstance(
+                    required,
+                    list,
+                ):
+                    safe_required = [
+                        item
+                        for item in required
+                        if item in {
+                            "ai_identity",
+                            "emir_context",
+                        }
+                    ]
+
+                    if safe_required:
+                        safe["required"] = (
+                            safe_required
+                        )
+
+            return safe
 
         # Explicit output allowlist. Provider-side transport
         # refs/JIDs/numbers can never escape to the cloud model.
