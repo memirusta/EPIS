@@ -182,7 +182,11 @@ fn spawn_bridge(app: &AppHandle) -> Result<Option<Child>, String> {
     ) {
         let mut command = Command::new(&program);
         command
-            .arg(&script)
+            // Tauri may return a Windows verbatim resource path
+            // (\\?\C:\...). Node's CLI can mis-resolve that form as
+            // the entry script. The child already runs inside bridge_dir,
+            // so use a relative entrypoint instead.
+            .arg("bridge.mjs")
             .current_dir(&bridge_dir)
             .env_clear()
             .env("EPIS_WHATSAPP_HEADLESS", "1")
