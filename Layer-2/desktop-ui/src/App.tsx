@@ -71,6 +71,14 @@ type ServerConfig = {
   token: string;
 };
 
+type ExternalReplyEvent = {
+  provider: "whatsapp";
+  outreachId: string;
+  content: string;
+  receivedAt: string;
+  contactName?: string;
+};
+
 type StartupState = {
   supported: boolean;
   enabled: boolean;
@@ -447,6 +455,33 @@ function asCanonicalMessage(value: unknown): Message | null {
               attachment !== null,
           )
       : undefined,
+  };
+}
+
+function asExternalReplyEvent(value: unknown): ExternalReplyEvent | null {
+  const item = asObject(value);
+  if (
+    item === null ||
+    item.provider !== "whatsapp" ||
+    typeof item.outreach_id !== "string" ||
+    !item.outreach_id.trim() ||
+    typeof item.content !== "string" ||
+    !item.content.trim() ||
+    typeof item.received_at !== "string" ||
+    !item.received_at.trim()
+  ) {
+    return null;
+  }
+
+  return {
+    provider: "whatsapp",
+    outreachId: item.outreach_id,
+    content: item.content.slice(0, MAX_PERSISTED_TEXT_CHARS),
+    receivedAt: item.received_at,
+    contactName:
+      typeof item.contact_name === "string" && item.contact_name.trim()
+        ? item.contact_name.trim().slice(0, 256)
+        : undefined,
   };
 }
 
@@ -867,6 +902,7 @@ export default function App() {
     useRef<HTMLInputElement | null>(null);
   const clientIdRef = useRef<string>(nextProtocolId("desktop"));
   const messagesRef = useRef<Message[]>([]);
+  const externalReplyOutreachIdsRef = useRef<Set<string>>(new Set());
   const importAttemptedRef = useRef(false);
   const activeDayRef = useRef<string>(localDayId());
 
@@ -1215,6 +1251,25 @@ export default function App() {
                 setMessages((current) => mergeCanonicalMessage(current, incoming));
               }
             }
+            return;
+          }
+
+          if (data.type === "external.reply") {
+            const reply = asExternalReplyEvent(data);
+            if (reply === null || externalReplyOutreachIdsRef.current.has(reply.outreachId)) {
+              return;
+            }
+
+            externalReplyOutreachIdsRef.current.add(reply.outreachId);
+            const sender = reply.contactName ?? "Bir kişi";
+            const incoming: Message = {
+              id: nextMessageId(),
+              role: "assistant",
+              text: `${sender} WhatsApp'tan cevap verdi:\n${reply.content}`,
+              messageId: `external.reply:${reply.outreachId}`,
+              createdAt: reply.receivedAt,
+            };
+            setMessages((current) => mergeCanonicalMessage(current, incoming));
             return;
           }
 
@@ -2529,4 +2584,3 @@ export default function App() {
     </div>
   );
 }
-

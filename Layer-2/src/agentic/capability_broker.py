@@ -574,6 +574,34 @@ def default_capability_specs() -> list[CapabilitySpec]:
             ),
         ),
         CapabilitySpec(
+            "whatsapp_start_auto_conversation",
+            (
+                "Start a temporary, bounded WhatsApp conversation with one trusted contact "
+                "only when Emir explicitly requests automatic replies to that named person "
+                "in the current turn. Provide the conversation goal and optionally the exact "
+                "first recipient-facing message. Never use for drafts or suggestions."
+            ),
+            _schema({
+                "contact_ref": {"type": "string", "maxLength": 200},
+                "goal": {"type": "string", "maxLength": 2000},
+                "initial_message": {"type": "string", "maxLength": 4000},
+                "duration_minutes": {"type": "integer"},
+                "max_auto_replies": {"type": "integer"},
+            }, ("contact_ref", "goal")),
+            "whatsapp.auto_conversation.start", "whatsapp",
+            risk_class=RiskClass.YELLOW.value,
+            confirmation_required=True,
+            confirmation_notice="Bu işlem geçici bir WhatsApp konuşması başlatacak.",
+        ),
+        CapabilitySpec(
+            "whatsapp_stop_auto_conversation",
+            "Stop the named person's active temporary WhatsApp auto conversation when Emir explicitly asks in this turn.",
+            _schema({"contact_ref": {"type": "string", "maxLength": 200}}, ("contact_ref",)),
+            "whatsapp.auto_conversation.stop", "whatsapp",
+            risk_class=RiskClass.YELLOW.value,
+            confirmation_required=True,
+        ),
+        CapabilitySpec(
             "voice_speak",
             (
                 "Speak text through the configured voice provider and return an "

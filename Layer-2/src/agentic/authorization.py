@@ -179,7 +179,8 @@ class SessionAuthorizationPolicy:
     @classmethod
     def classify(cls, capability: str, arguments: dict) -> str | None:
 
-        if capability == "whatsapp.send_to_contact":
+        if capability in {"whatsapp.send_to_contact", "whatsapp.auto_conversation.start",
+                          "whatsapp.auto_conversation.stop"}:
             return "external_communication"
         if capability in cls.FILE_MUTATION_CAPABILITIES:
             return "file_mutation"
@@ -304,6 +305,43 @@ class SessionAuthorizationPolicy:
         return any(term in text for term in cls._CATEGORY_CONTEXT.get(category, ()))
 
     def evaluate(self, capability: str, arguments: dict, user_message: str) -> AuthorizationDecision:
+
+        if capability in {"whatsapp.auto_conversation.start", "whatsapp.auto_conversation.stop"}:
+            category = "external_communication"
+            text = _fold(user_message)
+            contact = _fold(arguments.get("contact_ref", ""))
+            named = bool(contact and re.search(
+                r"(?<!\w)" + re.escape(contact) + r"(?!\w)", text,
+            ))
+            if capability.endswith(".start"):
+                denied = self._whatsapp_denied_current_turn(user_message) or any(
+                    phrase in text for phrase in (
+                        "taslak", "gondermeden", "gonderme", "draft", "without sending",
+                        "bir ara", "iyi olur", "ne yazabilirim", "what should i write",
+                        "fikrini degerlendir", "fikir ver", "oner", "suggest",
+                        "durdur", "bitir", "sonlandir", "kapat", "stop", "cancel",
+                    )
+                )
+                explicit = named and any(phrase in text for phrase in (
+                    "otomatik konus", "otomatik cevap", "cevaplarina sen don",
+                    "cevaplarini sen yanitla", "sen cevapla", "sen konus",
+                    "auto reply", "automatically reply",
+                    "talk to", "keep replying",
+                )) or (named and bool(re.search(r"\b(?:konus|yazis)\b", text)))
+            else:
+                denied = any(phrase in text for phrase in (
+                    "durdurma", "bitirme", "sonlandirma", "kapatma", "don't stop",
+                    "do not stop",
+                ))
+                explicit = named and any(phrase in text for phrase in (
+                    "durdur", "dur", "bitir", "sonlandir", "kapat", "stop", "cancel",
+                ))
+            if denied:
+                return AuthorizationDecision(category, False, "user_denied", False, denied=True)
+            return AuthorizationDecision(
+                category, bool(explicit),
+                "explicit_current_turn" if explicit else "assistant_proposed", False,
+            )
 
         # WhatsApp outreach is stricter than generic external
         # communication: an old session grant may never silently

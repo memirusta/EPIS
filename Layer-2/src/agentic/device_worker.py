@@ -13,7 +13,9 @@ from agentic.devices import DeviceRegistry, LocalDeviceAgent
 from agentic.permissions import PermissionEngine
 from agentic.tools import build_local_registry
 from agentic.whatsapp_outreach import (
+    WHATSAPP_DEVICE_AUTO_STOP_CAPABILITY,
     WHATSAPP_DEVICE_CAPABILITIES,
+    whatsapp_auto_stop_runtime_available,
     whatsapp_device_runtime_available,
 )
 
@@ -43,6 +45,10 @@ class DeviceWorker:
             self.local.device.capabilities.difference_update(
                 WHATSAPP_DEVICE_CAPABILITIES
             )
+            if whatsapp_auto_stop_runtime_available():
+                self.local.device.capabilities.add(
+                    WHATSAPP_DEVICE_AUTO_STOP_CAPABILITY
+                )
 
         if allowed_capabilities is not None:
             self.local.device.capabilities.intersection_update(allowed_capabilities)

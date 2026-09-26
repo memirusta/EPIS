@@ -11,10 +11,25 @@ from dataclasses import dataclass
 from typing import Protocol
 import os
 from pathlib import Path
+import re
 from urllib.parse import urlsplit
 import uuid
 
 import requests
+
+
+def _safe_contact_name(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    name = value.strip()[:256]
+    if (
+        not name or "@" in name
+        or "whatsapp.net" in name.casefold()
+        or re.search(r"\d[\d\s()+-]{6,}\d", name)
+        or any(ord(character) < 32 for character in name)
+    ):
+        return ""
+    return name
 
 
 class ContactResolver(Protocol):
@@ -90,6 +105,14 @@ class VaultContactResolver:
             .resolve_contact_ref(
                 contact_ref
             )
+        )
+
+    def display_name_for_person(
+        self,
+        person_id: str,
+    ) -> str:
+        return self.vault.display_name_for_person(
+            person_id
         )
 
 
@@ -1216,9 +1239,16 @@ WHATSAPP_DEVICE_REPLY_CAPABILITY = (
     "whatsapp.outreach.accept_reply"
 )
 
+WHATSAPP_DEVICE_AUTO_START_CAPABILITY = "whatsapp.auto_conversation.start"
+WHATSAPP_DEVICE_AUTO_STOP_CAPABILITY = "whatsapp.auto_conversation.stop"
+WHATSAPP_DEVICE_AUTO_SEND_CAPABILITY = "whatsapp.auto_conversation.send_reply"
+
 WHATSAPP_DEVICE_CAPABILITIES = frozenset({
     WHATSAPP_DEVICE_SEND_CAPABILITY,
     WHATSAPP_DEVICE_REPLY_CAPABILITY,
+    WHATSAPP_DEVICE_AUTO_START_CAPABILITY,
+    WHATSAPP_DEVICE_AUTO_STOP_CAPABILITY,
+    WHATSAPP_DEVICE_AUTO_SEND_CAPABILITY,
 })
 
 
@@ -1257,6 +1287,10 @@ def whatsapp_device_runtime_available() -> bool:
         return False
 
 
+def whatsapp_auto_stop_runtime_available() -> bool:
+    return _DEFAULT_WHATSAPP_DEVICE_CONTROLLER is not None
+
+
 class UnavailableWhatsappDeviceController:
     def available(self) -> bool:
         return False
@@ -1281,6 +1315,10 @@ class UnavailableWhatsappDeviceController:
                 "whatsapp_bridge_unavailable",
         }
 
+    start_auto_conversation = accept_reply
+    stop_auto_conversation = accept_reply
+    send_auto_reply = accept_reply
+
 
 class WhatsappDeviceController:
     """Private Lenovo-side WhatsApp capability controller."""
@@ -1298,11 +1336,15 @@ class WhatsappDeviceController:
             )
         )
 
+        self.contacts = (
+            VaultContactResolver(
+                vault
+            )
+        )
+
         self.provider = (
             WhatsappOutreachProvider(
-                VaultContactResolver(
-                    vault
-                ),
+                self.contacts,
                 bridge,
                 self.state,
             )
@@ -1331,6 +1373,109 @@ class WhatsappDeviceController:
             "whatsapp.send_to_contact",
             arguments,
         )
+
+    def start_auto_conversation(self, arguments: dict) -> dict:
+        if not self.available():
+            return {"ok": False, "error": "whatsapp_bridge_unavailable"}
+        contact_ref = str(arguments.get("contact_ref") or "").strip()
+        goal = str(arguments.get("goal") or "").strip()
+        initial = str(arguments.get("initial_message") or "").strip()
+        if not contact_ref or not goal:
+            return {"ok": False, "error": "contact_and_goal_required"}
+        try:
+            started = self.state.vault.start_whatsapp_auto_conversation(
+                contact_ref=contact_ref,
+                goal=goal,
+                initial_message=initial,
+                duration_minutes=int(arguments.get("duration_minutes", 30)),
+                max_auto_replies=int(arguments.get("max_auto_replies", 10)),
+            )
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "invalid_auto_conversation_limits"}
+        if not started.get("ok") or not initial:
+            if started.get("ok"):
+                started["contact_name"] = _safe_contact_name(started.get("contact_name"))
+            return started
+
+        session_id = str(started["session_id"])
+        sent = self.provider.execute(
+            "whatsapp.send_to_contact",
+            {"contact_ref": contact_ref, "message": initial},
+        )
+        if not sent.get("ok") or not sent.get("reply_tracking"):
+            self.state.vault.stop_whatsapp_auto_conversation(session_id=session_id)
+            if sent.get("ok"):
+                return {"ok": True, "status": "sent_untracked",
+                        "auto_conversation_active": False,
+                        "contact_name": _safe_contact_name(started["contact_name"])}
+            safe = {"ok": False, "error": str(sent.get("error") or "initial_send_failed")}
+            for key in ("retryable", "required"):
+                if key in sent:
+                    safe[key] = sent[key]
+            return safe
+        if not self.state.vault.activate_whatsapp_auto_conversation(
+            session_id, str(sent.get("outreach_id") or ""),
+        ):
+            self.state.vault.stop_whatsapp_auto_conversation(session_id=session_id)
+            return {"ok": True, "status": "sent_without_active_session",
+                    "auto_conversation_active": False}
+        return {"ok": True, "status": "active", "session_id": session_id,
+                "contact_name": _safe_contact_name(started["contact_name"]),
+                "initial_message_sent": True, "auto_conversation_active": True}
+
+    def stop_auto_conversation(self, arguments: dict) -> dict:
+        contact_ref = str(arguments.get("contact_ref") or "").strip()
+        if not contact_ref:
+            return {"ok": False, "error": "contact_ref_required"}
+        return self.state.vault.stop_whatsapp_auto_conversation(contact_ref=contact_ref)
+
+    def send_auto_reply(self, arguments: dict) -> dict:
+        session_id = str(arguments.get("session_id") or "").strip()
+        attempt_id = str(arguments.get("attempt_id") or "").strip()
+        message = str(arguments.get("message") or "").strip()
+        if not self.available():
+            return {"ok": False, "error": "whatsapp_bridge_unavailable"}
+        prepared = self.state.vault.prepare_whatsapp_auto_send(
+            session_id=session_id, attempt_id=attempt_id, message=message,
+        )
+        if not prepared.get("ok"):
+            return prepared
+        outreach_id = str(prepared["outreach_id"])
+        try:
+            sent = self.bridge.send(
+                prepared["provider_contact_ref"], message,
+                outreach_id=outreach_id,
+            )
+        except Exception:
+            self.state.vault.finish_whatsapp_auto_send(
+                attempt_id=attempt_id, outreach_id=outreach_id,
+                status="unknown", error="bridge_exception",
+            )
+            return {"ok": False, "error": "auto_send_outcome_unknown", "outcome": "unknown"}
+        if not isinstance(sent, dict):
+            sent = {"ok": False, "error": "invalid_bridge_result", "outcome": "unknown"}
+        if sent.get("ok") and sent.get("provider_message_ref"):
+            self.state.vault.finish_whatsapp_auto_send(
+                attempt_id=attempt_id, outreach_id=outreach_id,
+                status="sent", provider_message_ref=str(sent["provider_message_ref"]),
+            )
+            return {"ok": True, "status": "sent", "session_id": session_id,
+                    "outreach_id": outreach_id}
+        error = str(sent.get("error") or "auto_send_failed")
+        unknown = (
+            bool(sent.get("ok"))
+            or sent.get("outcome") == "unknown"
+            or error not in {
+                "recipient_identity_context_missing",
+                "recipient_identity_deception",
+            }
+        )
+        self.state.vault.finish_whatsapp_auto_send(
+            attempt_id=attempt_id, outreach_id=outreach_id,
+            status="unknown" if unknown else "failed", error=error,
+        )
+        return {"ok": False, "error": error,
+                "outcome": "unknown" if unknown else "failed"}
 
     def accept_reply(
         self,
@@ -1371,6 +1516,13 @@ class WhatsappDeviceController:
             )
         )
 
+        # An authenticated inbound opt-out revokes the local lease even if
+        # outreach correlation later reports unmatched or ambiguous.
+        self.state.vault.stop_whatsapp_auto_on_opt_out(
+            provider_contact_ref=contact_ref,
+            content=content,
+        )
+
         if quoted_ref:
             result = (
                 self.state.accept_reply(
@@ -1399,10 +1551,36 @@ class WhatsappDeviceController:
                 )
             )
 
-        return {
-            "ok": True,
-            **result,
-        }
+        response = {"ok": True, "status": str(result.get("status") or "")}
+        if isinstance(result.get("outreach_id"), str):
+            response["outreach_id"] = result["outreach_id"]
+        if response["status"] == "ambiguous" and isinstance(result.get("candidate_count"), int):
+            response["candidate_count"] = result["candidate_count"]
+
+        # The cloud relay may expose this human-facing name to an already
+        # connected EPIS client, but never the person ID or provider contact
+        # reference used to obtain it.
+        if result.get("status") in {"accepted", "duplicate"}:
+            contact_name = _safe_contact_name(self.contacts.display_name_for_person(
+                str(result.get("person_id") or "")
+            ))
+            if contact_name:
+                response["contact_name"] = contact_name
+
+        if result.get("status") == "accepted":
+            try:
+                claimed = self.state.vault.claim_whatsapp_auto_reply(
+                    person_id=str(result.get("person_id") or ""),
+                    incoming_message_ref=incoming_ref,
+                    content=content,
+                )
+            except Exception:
+                claimed = {"auto_reply_eligible": False}
+            if claimed.get("auto_reply_eligible") is True:
+                claimed["contact_name"] = _safe_contact_name(claimed.get("contact_name"))
+                response.update(claimed)
+
+        return response
 
 def register_whatsapp_device_tools(
     registry,
@@ -1478,6 +1656,29 @@ def register_whatsapp_device_tools(
         "additionalProperties": False,
     }
 
+    auto_start_schema = {
+        "type": "object", "properties": {
+            "contact_ref": {"type": "string", "maxLength": 200},
+            "goal": {"type": "string", "maxLength": 2000},
+            "initial_message": {"type": "string", "maxLength": 4000},
+            "duration_minutes": {"type": "integer"},
+            "max_auto_replies": {"type": "integer"},
+        }, "required": ["contact_ref", "goal"], "additionalProperties": False,
+    }
+    auto_stop_schema = {
+        "type": "object", "properties": {
+            "contact_ref": {"type": "string", "maxLength": 200},
+        }, "required": ["contact_ref"], "additionalProperties": False,
+    }
+    auto_send_schema = {
+        "type": "object", "properties": {
+            "session_id": {"type": "string", "maxLength": 64},
+            "attempt_id": {"type": "string", "maxLength": 64},
+            "message": {"type": "string", "maxLength": 4000},
+        }, "required": ["session_id", "attempt_id", "message"],
+        "additionalProperties": False,
+    }
+
     registry.register(
         ToolSpec(
             "whatsapp_outreach_device_send",
@@ -1513,6 +1714,21 @@ def register_whatsapp_device_tools(
         controller.accept_reply,
     )
 
+    for name, capability, schema, handler in (
+        ("whatsapp_auto_device_start", WHATSAPP_DEVICE_AUTO_START_CAPABILITY,
+         auto_start_schema, controller.start_auto_conversation),
+        ("whatsapp_auto_device_stop", WHATSAPP_DEVICE_AUTO_STOP_CAPABILITY,
+         auto_stop_schema, controller.stop_auto_conversation),
+        ("whatsapp_auto_device_send_reply", WHATSAPP_DEVICE_AUTO_SEND_CAPABILITY,
+         auto_send_schema, controller.send_auto_reply),
+    ):
+        registry.register(
+            ToolSpec(name, "Internal trusted-device WhatsApp auto conversation primitive.",
+                     schema, capability, risk_class="yellow", confirmation_required=True,
+                     platforms=("windows",), model_visible=False),
+            handler,
+        )
+
     return controller
 
 
@@ -1538,10 +1754,13 @@ class CoreWhatsappOutreachProvider:
     def capabilities(self) -> set[str]:
         return {
             "whatsapp.send_to_contact",
+            WHATSAPP_DEVICE_AUTO_START_CAPABILITY,
+            WHATSAPP_DEVICE_AUTO_STOP_CAPABILITY,
         }
 
     def _candidate_transports(
         self,
+        device_capability: str = WHATSAPP_DEVICE_SEND_CAPABILITY,
     ) -> list:
         result = []
 
@@ -1573,7 +1792,7 @@ class CoreWhatsappOutreachProvider:
                 device is not None
                 and device.online
                 and
-                WHATSAPP_DEVICE_SEND_CAPABILITY
+                device_capability
                 in device.capabilities
             ):
                 result.append(
@@ -1586,10 +1805,8 @@ class CoreWhatsappOutreachProvider:
         # Fail closed when multiple trusted devices claim the
         # same private WhatsApp capability.
         return (
-            len(
-                self._candidate_transports()
-            )
-            == 1
+            len(self._candidate_transports()) == 1
+            or len(self._candidate_transports(WHATSAPP_DEVICE_AUTO_STOP_CAPABILITY)) == 1
         )
 
     def execute(
@@ -1597,10 +1814,12 @@ class CoreWhatsappOutreachProvider:
         capability: str,
         arguments: dict,
     ) -> dict:
-        if (
-            capability
-            != "whatsapp.send_to_contact"
-        ):
+        device_capability = {
+            "whatsapp.send_to_contact": WHATSAPP_DEVICE_SEND_CAPABILITY,
+            WHATSAPP_DEVICE_AUTO_START_CAPABILITY: WHATSAPP_DEVICE_AUTO_START_CAPABILITY,
+            WHATSAPP_DEVICE_AUTO_STOP_CAPABILITY: WHATSAPP_DEVICE_AUTO_STOP_CAPABILITY,
+        }.get(capability)
+        if device_capability is None:
             return {
                 "ok": False,
                 "error":
@@ -1608,7 +1827,7 @@ class CoreWhatsappOutreachProvider:
             }
 
         candidates = (
-            self._candidate_transports()
+            self._candidate_transports(device_capability)
         )
 
         if not candidates:
@@ -1628,7 +1847,7 @@ class CoreWhatsappOutreachProvider:
         transport = candidates[0]
 
         result = transport.execute(
-            WHATSAPP_DEVICE_SEND_CAPABILITY,
+            device_capability,
             dict(arguments),
             confirmed=True,
             request_id=(
@@ -1700,6 +1919,20 @@ class CoreWhatsappOutreachProvider:
                             safe_required
                         )
 
+            return safe
+
+        if capability in {
+            WHATSAPP_DEVICE_AUTO_START_CAPABILITY,
+            WHATSAPP_DEVICE_AUTO_STOP_CAPABILITY,
+        }:
+            safe = {"ok": True}
+            for key in ("status", "session_id", "contact_name",
+                        "initial_message_sent", "auto_conversation_active"):
+                if key in result:
+                    safe[key] = (
+                        _safe_contact_name(result[key])
+                        if key == "contact_name" else result[key]
+                    )
             return safe
 
         # Explicit output allowlist. Provider-side transport

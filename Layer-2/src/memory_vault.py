@@ -13,7 +13,7 @@ schema/metadata remains visible while personal text values are field-encrypted.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -25,7 +25,7 @@ from typing import Any, Iterable
 import uuid
 
 
-_SCHEMA_VERSION = 2  # external_outreach_schema_v1
+_SCHEMA_VERSION = 3  # whatsapp_auto_conversation_v1
 _TOKEN_RE = re.compile(r"[\wçğıöşüÇĞİÖŞÜ-]{2,}", re.UNICODE)
 _STOPWORDS = {
     "acaba", "ama", "artık", "bana", "ben", "beni", "benim", "bir", "biri",
@@ -70,6 +70,25 @@ def _tokens(value: str) -> set[str]:
         for token in _TOKEN_RE.findall(value or "")
         if token.casefold() not in _STOPWORDS
     }
+
+
+def _recipient_opted_out(value: str) -> bool:
+    folded = str(value or "").translate(str.maketrans({
+        "ç": "c", "ğ": "g", "ı": "i", "ö": "o", "ş": "s", "ü": "u",
+        "Ç": "c", "Ğ": "g", "İ": "i", "I": "i", "Ö": "o", "Ş": "s", "Ü": "u",
+    })).casefold()
+    folded = re.sub(r"[^\w\s']", " ", folded)
+    folded = re.sub(r"\s+", " ", folded).strip()
+    if folded in {"dur", "yazma", "mesaj atma", "bana yazma", "cevap verme",
+                  "konusmayi birak", "istemiyorum", "mesaj gonderme", "stop",
+                  "don't message me", "do not message me", "stop messaging me",
+                  "don't reply", "leave me alone"}:
+        return True
+    return any(phrase in folded for phrase in (
+        "bana yazma", "mesaj atma", "mesaj gonderme", "cevap verme",
+        "konusmayi birak", "don't message me", "do not message me",
+        "stop messaging me", "don't reply", "leave me alone",
+    )) or bool(re.search(r"\b(?:dur|yazma|istemiyorum|stop)\b", folded))
 
 
 class LocalMemoryVault:
@@ -254,6 +273,43 @@ class LocalMemoryVault:
                         provider,
                         inbound_message_fingerprint
                     )
+                );
+
+                CREATE TABLE IF NOT EXISTS whatsapp_auto_conversations (
+                    session_id TEXT PRIMARY KEY,
+                    person_id TEXT NOT NULL REFERENCES people(id),
+                    provider_contact_ref_enc TEXT NOT NULL,
+                    goal_enc TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    max_auto_replies INTEGER NOT NULL,
+                    auto_reply_count INTEGER NOT NULL DEFAULT 0,
+                    expires_at TEXT NOT NULL,
+                    initial_outreach_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    stopped_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_whatsapp_auto_person
+                    ON whatsapp_auto_conversations(person_id, status);
+
+                CREATE TABLE IF NOT EXISTS whatsapp_auto_reply_attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES whatsapp_auto_conversations(session_id),
+                    inbound_fingerprint TEXT NOT NULL UNIQUE,
+                    inbound_content_enc TEXT NOT NULL,
+                    generated_content_enc TEXT NOT NULL DEFAULT '',
+                    state TEXT NOT NULL,
+                    outreach_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS whatsapp_auto_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL REFERENCES whatsapp_auto_conversations(session_id),
+                    direction TEXT NOT NULL,
+                    content_enc TEXT NOT NULL,
+                    created_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS memory_changes (
@@ -1076,6 +1132,326 @@ class LocalMemoryVault:
                 "confidence": float(row["confidence"] or 0.0),
             }
         return {"people": people}
+
+    def display_name_for_person(self, person_id: str) -> str:
+        """Return only a person's enrolled human-facing name.
+
+        This is intentionally narrower than ``list_people``: trusted-device
+        reply notifications may use the name, but must never need routing
+        metadata, notes, aliases, or a provider identifier.
+        """
+        clean_person_id = str(person_id or "").strip()
+        if not clean_person_id:
+            return ""
+
+        with self._lock, self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT canonical_name_enc
+                FROM people
+                WHERE id=?
+                """,
+                (clean_person_id,),
+            ).fetchone()
+
+        if row is None:
+            return ""
+
+        return self._dec(row["canonical_name_enc"]).strip()[:256]
+
+    def start_whatsapp_auto_conversation(
+        self, *, contact_ref: str, goal: str, duration_minutes: int = 30,
+        max_auto_replies: int = 10, initial_message: str = "",
+    ) -> dict[str, Any]:
+        resolved = self.resolve_contact_ref(contact_ref)
+        if resolved.get("status") != "resolved":
+            return {"ok": False, "error": "contact_" + str(resolved.get("status") or "unavailable")}
+        clean_goal = str(goal or "").strip()
+        clean_initial = str(initial_message or "").strip()
+        if not clean_goal or len(clean_goal) > 2000 or len(clean_initial) > 4000:
+            return {"ok": False, "error": "invalid_auto_conversation_content"}
+        duration = max(1, min(120, int(duration_minutes)))
+        quota = max(1, min(30, int(max_auto_replies)))
+        now = _utc_now()
+        expires = (datetime.now(timezone.utc) + timedelta(minutes=duration)).isoformat()
+        session_id = uuid.uuid4().hex
+        person_id = str(resolved["person_id"])
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """UPDATE whatsapp_auto_conversations
+                   SET status='stopped', stopped_at=?, updated_at=?
+                   WHERE person_id=? AND status IN ('active', 'starting')""",
+                (now, now, person_id),
+            )
+            conn.execute(
+                """INSERT INTO whatsapp_auto_conversations
+                   (session_id, person_id, provider_contact_ref_enc, goal_enc,
+                    status, max_auto_replies, expires_at, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (session_id, person_id, self._enc(str(resolved["provider_contact_ref"])),
+                 self._enc(clean_goal), "starting" if clean_initial else "active",
+                 quota, expires, now, now),
+            )
+        return {"ok": True, "session_id": session_id,
+                "status": "starting" if clean_initial else "active",
+                "auto_conversation_active": not bool(clean_initial),
+                "contact_name": str(resolved["canonical_name"])[:256]}
+
+    def whatsapp_auto_conversation_state(self, session_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connection() as conn:
+            row = conn.execute(
+                """SELECT status, auto_reply_count, max_auto_replies, expires_at,
+                          initial_outreach_id FROM whatsapp_auto_conversations
+                   WHERE session_id=?""", (session_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def stop_whatsapp_auto_on_opt_out(self, *, provider_contact_ref: str, content: str) -> bool:
+        if not provider_contact_ref or not _recipient_opted_out(content):
+            return False
+        now = _utc_now()
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """SELECT session_id, provider_contact_ref_enc
+                   FROM whatsapp_auto_conversations WHERE status='active'"""
+            ).fetchall()
+            for row in rows:
+                if self._dec(row["provider_contact_ref_enc"]) == provider_contact_ref:
+                    conn.execute(
+                        """UPDATE whatsapp_auto_conversations
+                           SET status='stopped', stopped_at=?, updated_at=? WHERE session_id=?""",
+                        (now, now, row["session_id"]),
+                    )
+                    return True
+        return False
+
+    def activate_whatsapp_auto_conversation(self, session_id: str, outreach_id: str) -> bool:
+        now = _utc_now()
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT outbound_message_enc, person_id FROM external_outreach
+                   WHERE outreach_id=? AND status='sent'""", (outreach_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            changed = conn.execute(
+                """UPDATE whatsapp_auto_conversations
+                   SET status='active', initial_outreach_id=?, updated_at=?
+                   WHERE session_id=? AND person_id=? AND status='starting' AND expires_at>?""",
+                (outreach_id, now, session_id, row["person_id"], now),
+            ).rowcount
+            if changed:
+                conn.execute(
+                    """INSERT INTO whatsapp_auto_messages(session_id, direction, content_enc, created_at)
+                       VALUES (?, 'outbound', ?, ?)""",
+                    (session_id, row["outbound_message_enc"], now),
+                )
+            return bool(changed)
+
+    def stop_whatsapp_auto_conversation(
+        self, *, contact_ref: str = "", session_id: str = "",
+    ) -> dict[str, Any]:
+        person_id = ""
+        if contact_ref:
+            resolved = self.resolve_contact_ref(contact_ref)
+            if resolved.get("status") not in {"resolved", "not_allowlisted", "not_configured"}:
+                return {"ok": False, "error": "contact_" + str(resolved.get("status") or "unavailable")}
+            person_id = str(resolved["person_id"])
+        if not person_id and not session_id:
+            return {"ok": False, "error": "session_required"}
+        now = _utc_now()
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if person_id:
+                changed = conn.execute(
+                    """UPDATE whatsapp_auto_conversations
+                       SET status='stopped', stopped_at=?, updated_at=?
+                       WHERE person_id=? AND status IN ('active', 'starting')""",
+                    (now, now, person_id),
+                ).rowcount
+            else:
+                changed = conn.execute(
+                    """UPDATE whatsapp_auto_conversations
+                       SET status='stopped', stopped_at=?, updated_at=?
+                       WHERE session_id=? AND status IN ('active', 'starting')""",
+                    (now, now, session_id),
+                ).rowcount
+        return {"ok": True, "status": "stopped" if changed else "not_active"}
+
+    def claim_whatsapp_auto_reply(
+        self, *, person_id: str, incoming_message_ref: str, content: str,
+    ) -> dict[str, Any]:
+        if not incoming_message_ref or not content:
+            return {"auto_reply_eligible": False}
+        fingerprint = hashlib.sha256(
+            ("whatsapp\0inbound\0" + incoming_message_ref).encode("utf-8")
+        ).hexdigest()
+        now = _utc_now()
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            session = conn.execute(
+                """SELECT * FROM whatsapp_auto_conversations
+                   WHERE person_id=? AND status='active'
+                   ORDER BY created_at DESC LIMIT 1""", (person_id,),
+            ).fetchone()
+            if session is None:
+                return {"auto_reply_eligible": False}
+            session_id = str(session["session_id"])
+            if str(session["expires_at"]) <= now:
+                conn.execute(
+                    "UPDATE whatsapp_auto_conversations SET status='expired', updated_at=? WHERE session_id=?",
+                    (now, session_id),
+                )
+                return {"auto_reply_eligible": False}
+            if _recipient_opted_out(content):
+                conn.execute(
+                    """UPDATE whatsapp_auto_conversations
+                       SET status='stopped', stopped_at=?, updated_at=? WHERE session_id=?""",
+                    (now, now, session_id),
+                )
+                return {"auto_reply_eligible": False}
+            if conn.execute(
+                "SELECT 1 FROM whatsapp_auto_reply_attempts WHERE inbound_fingerprint=?",
+                (fingerprint,),
+            ).fetchone():
+                return {"auto_reply_eligible": False}
+            reserved = conn.execute(
+                "SELECT COUNT(*) FROM whatsapp_auto_reply_attempts WHERE session_id=?",
+                (session_id,),
+            ).fetchone()[0]
+            if int(reserved) >= int(session["max_auto_replies"]):
+                conn.execute(
+                    "UPDATE whatsapp_auto_conversations SET status='completed', updated_at=? WHERE session_id=?",
+                    (now, session_id),
+                )
+                return {"auto_reply_eligible": False}
+            history = conn.execute(
+                """SELECT direction, content_enc FROM whatsapp_auto_messages
+                   WHERE session_id=? ORDER BY id DESC LIMIT 8""",
+                (session_id,),
+            ).fetchall()
+            attempt_id = uuid.uuid4().hex
+            conn.execute(
+                """INSERT INTO whatsapp_auto_reply_attempts
+                   (attempt_id, session_id, inbound_fingerprint, inbound_content_enc,
+                    state, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, 'generation_started', ?, ?)""",
+                (attempt_id, session_id, fingerprint, self._enc(content), now, now),
+            )
+            conn.execute(
+                """INSERT INTO whatsapp_auto_messages(session_id, direction, content_enc, created_at)
+                   VALUES (?, 'inbound', ?, ?)""",
+                (session_id, self._enc(content), now),
+            )
+            name = conn.execute(
+                "SELECT canonical_name_enc FROM people WHERE id=?", (person_id,),
+            ).fetchone()
+            return {
+                "auto_reply_eligible": True,
+                "session_id": session_id,
+                "attempt_id": attempt_id,
+                "contact_name": self._dec(name["canonical_name_enc"]).strip()[:256] if name else "",
+                "goal": self._dec(session["goal_enc"])[:2000],
+                "history": [
+                    {"direction": str(item["direction"]), "content": self._dec(item["content_enc"])[:4000]}
+                    for item in reversed(history)
+                ],
+            }
+
+    def prepare_whatsapp_auto_send(
+        self, *, session_id: str, attempt_id: str, message: str,
+    ) -> dict[str, Any]:
+        clean_message = str(message or "").strip()
+        if not clean_message or len(clean_message) > 4000:
+            return {"ok": False, "error": "invalid_message"}
+        now = _utc_now()
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT s.*, a.state FROM whatsapp_auto_reply_attempts a
+                   JOIN whatsapp_auto_conversations s ON s.session_id=a.session_id
+                   WHERE a.attempt_id=? AND s.session_id=?""",
+                (attempt_id, session_id),
+            ).fetchone()
+            if row is None or row["state"] != "generation_started" or row["status"] != "active":
+                return {"ok": False, "error": "auto_reply_not_available"}
+            if str(row["expires_at"]) <= now:
+                conn.execute(
+                    "UPDATE whatsapp_auto_conversations SET status='expired', updated_at=? WHERE session_id=?",
+                    (now, session_id),
+                )
+                return {"ok": False, "error": "session_expired"}
+            outreach_id = uuid.uuid4().hex
+            conn.execute(
+                """INSERT INTO external_outreach
+                   (outreach_id, person_id, provider, provider_contact_ref_enc,
+                    outbound_message_enc, status, created_at, updated_at)
+                   VALUES (?, ?, 'whatsapp', ?, ?, 'dispatching', ?, ?)""",
+                (outreach_id, row["person_id"], row["provider_contact_ref_enc"],
+                 self._enc(clean_message), now, now),
+            )
+            conn.execute(
+                """UPDATE whatsapp_auto_reply_attempts
+                   SET generated_content_enc=?, state='send_started', outreach_id=?, updated_at=?
+                   WHERE attempt_id=?""",
+                (self._enc(clean_message), outreach_id, now, attempt_id),
+            )
+            return {"ok": True, "outreach_id": outreach_id,
+                    "provider_contact_ref": self._dec(row["provider_contact_ref_enc"])}
+
+    def finish_whatsapp_auto_send(
+        self, *, attempt_id: str, outreach_id: str, status: str,
+        provider_message_ref: str = "", error: str = "",
+    ) -> None:
+        now = _utc_now()
+        final_status = status if status in {"sent", "failed", "unknown"} else "unknown"
+        if final_status == "sent" and not provider_message_ref:
+            final_status = "unknown"
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT a.session_id, a.generated_content_enc, s.auto_reply_count
+                   FROM whatsapp_auto_reply_attempts a
+                   JOIN whatsapp_auto_conversations s ON s.session_id=a.session_id
+                   WHERE a.attempt_id=? AND a.outreach_id=? AND a.state='send_started'""",
+                (attempt_id, outreach_id),
+            ).fetchone()
+            if row is None:
+                return
+            conn.execute(
+                "UPDATE whatsapp_auto_reply_attempts SET state=?, updated_at=? WHERE attempt_id=?",
+                (final_status, now, attempt_id),
+            )
+            if final_status == "sent":
+                fingerprint = hashlib.sha256(
+                    ("whatsapp\0" + provider_message_ref).encode("utf-8")
+                ).hexdigest()
+                conn.execute(
+                    """UPDATE external_outreach SET status='sent', provider_message_ref_enc=?,
+                       provider_message_fingerprint=?, updated_at=? WHERE outreach_id=?""",
+                    (self._enc(provider_message_ref), fingerprint, now, outreach_id),
+                )
+                conn.execute(
+                    """INSERT INTO whatsapp_auto_messages(session_id, direction, content_enc, created_at)
+                       VALUES (?, 'outbound', ?, ?)""",
+                    (row["session_id"], row["generated_content_enc"], now),
+                )
+                count = int(row["auto_reply_count"]) + 1
+                conn.execute(
+                    """UPDATE whatsapp_auto_conversations SET auto_reply_count=?,
+                       status=CASE WHEN ? >= max_auto_replies THEN 'completed' ELSE status END,
+                       updated_at=? WHERE session_id=?""",
+                    (count, count, now, row["session_id"]),
+                )
+            else:
+                conn.execute(
+                    """UPDATE external_outreach SET status='failed', error_enc=?, updated_at=?
+                       WHERE outreach_id=?""",
+                    (self._enc(error[:200]), now, outreach_id),
+                )
 
     def create_external_outreach(
         self,

@@ -20,7 +20,9 @@ from agentic.cloud_transport import CloudDeviceTransport
 from agentic.devices import Device
 from agentic.whatsapp_outreach import (
     WHATSAPP_DEVICE_REPLY_CAPABILITY,
+    _safe_contact_name,
 )
+from agentic.whatsapp_auto_conversation import WhatsAppAutoReplyCoordinator
 from server.daily_transcript import build_daily_transcript_store, day_id_for
 
 
@@ -1472,6 +1474,8 @@ def _whatsapp_outreach_reply_transports(
 
 async def _route_whatsapp_outreach_reply(
     data: Any,
+    *,
+    broadcast: bool = False,
 ) -> dict[str, Any]:
     arguments = (
         _validate_whatsapp_outreach_reply(
@@ -1602,7 +1606,49 @@ async def _route_whatsapp_outreach_reply(
             "candidate_count"
         ] = candidate_count
 
+    if broadcast and safe["status"] == "accepted":
+        event = _external_reply_event(
+            result,
+            arguments,
+            outreach_id=str(safe.get("outreach_id") or ""),
+        )
+        if event is not None:
+            await _broadcast_clients(event)
+        if result.get("auto_reply_eligible") is True:
+            coordinator = WhatsAppAutoReplyCoordinator.from_core(core)
+            _spawn_background(coordinator.process(
+                result, arguments["content"], candidates[0],
+            ))
+
     return safe
+
+
+def _external_reply_event(
+    device_result: dict[str, Any],
+    arguments: dict[str, Any],
+    *,
+    outreach_id: str,
+) -> dict[str, Any] | None:
+    """Build the strictly allowlisted client event for one accepted reply."""
+    clean_outreach_id = _valid_id(outreach_id)
+    content = str(arguments.get("content") or "").strip()
+
+    if not clean_outreach_id or not content:
+        return None
+
+    event = {
+        "type": "external.reply",
+        "provider": "whatsapp",
+        "outreach_id": clean_outreach_id,
+        "content": content,
+        "received_at": utc_now(),
+    }
+
+    contact_name = _safe_contact_name(device_result.get("contact_name"))
+    if contact_name:
+        event["contact_name"] = contact_name
+
+    return event
 
 @app.post(
     "/internal/whatsapp/outreach-reply"
@@ -1624,7 +1670,8 @@ async def whatsapp_outreach_reply(
 
     result = await (
         _route_whatsapp_outreach_reply(
-            data
+            data,
+            broadcast=True,
         )
     )
 

@@ -82,6 +82,9 @@ class DeviceArchitectureTests(unittest.TestCase):
         expected_capabilities.difference_update({
             "whatsapp.outreach.send",
             "whatsapp.outreach.accept_reply",
+            "whatsapp.auto_conversation.start",
+            "whatsapp.auto_conversation.stop",
+            "whatsapp.auto_conversation.send_reply",
         })
         self.assertEqual(
             set(manifest["capabilities"]),
@@ -255,7 +258,7 @@ class DeviceArchitectureTests(unittest.TestCase):
 
     def test_new_registry_metadata(self):
         registry = build_local_registry()
-        self.assertEqual(len(registry.specs()), 65)
+        self.assertEqual(len(registry.specs()), 68)
         self.assertEqual(registry.get("open_url")[0].risk_class, "yellow")
         self.assertIn("system.battery", registry.capabilities("windows"))
         self.assertNotIn("phone.call", registry.capabilities("windows"))
@@ -334,4 +337,3 @@ class DeviceArchitectureTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

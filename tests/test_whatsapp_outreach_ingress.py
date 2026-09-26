@@ -96,6 +96,8 @@ class FakeTransport:
                     "PRIVATE_PERSON",
                 "memory_id":
                     "PRIVATE_MEMORY",
+                "contact_name":
+                    "Merve",
             }
         )
 
@@ -353,6 +355,94 @@ class WhatsappOutreachIngressTests(
                 "request_id"
             ],
         )
+
+    def test_accepted_reply_broadcasts_one_allowlisted_event(
+        self,
+    ):
+        transport = FakeTransport()
+        core = FakeCore([transport])
+        broadcast = AsyncMock()
+
+        with (
+            patch.object(server_app, "get_core", return_value=core),
+            patch.object(server_app, "_broadcast_clients", broadcast),
+        ):
+            result = asyncio.run(
+                server_app._route_whatsapp_outreach_reply(
+                    self.payload(),
+                    broadcast=True,
+                )
+            )
+
+        self.assertEqual(result["status"], "accepted")
+        broadcast.assert_awaited_once()
+        event = broadcast.await_args.args[0]
+        self.assertEqual(event["type"], "external.reply")
+        self.assertEqual(event["provider"], "whatsapp")
+        self.assertEqual(event["outreach_id"], "outreach-safe")
+        self.assertEqual(event["contact_name"], "Merve")
+        self.assertEqual(event["content"], self.payload()["content"])
+        self.assertIn("received_at", event)
+        self.assertEqual(
+            set(event),
+            {
+                "type",
+                "provider",
+                "outreach_id",
+                "contact_name",
+                "content",
+                "received_at",
+            },
+        )
+
+        rendered = repr(event)
+        for private_value in (
+            self.payload()["provider_message_ref"],
+            self.payload()["incoming_message_ref"],
+            self.payload()["provider_contact_ref"],
+            "PRIVATE_PERSON",
+            "PRIVATE_MEMORY",
+        ):
+            self.assertNotIn(private_value, rendered)
+
+    def test_duplicate_ambiguous_or_unmatched_reply_never_broadcasts(
+        self,
+    ):
+        duplicate = FakeTransport(result={
+            "ok": True,
+            "status": "duplicate",
+            "outreach_id": "outreach-safe",
+            "person_id": "PRIVATE_PERSON",
+            "memory_id": "PRIVATE_MEMORY",
+            "contact_name": "Merve",
+        })
+        ambiguous = FakeTransport(result={
+            "ok": True,
+            "status": "ambiguous",
+            "candidate_count": 2,
+        })
+        unmatched = FakeTransport(result={
+            "ok": True,
+            "status": "unmatched",
+        })
+
+        for transport in (duplicate, ambiguous, unmatched):
+            broadcast = AsyncMock()
+            with (
+                patch.object(
+                    server_app,
+                    "get_core",
+                    return_value=FakeCore([transport]),
+                ),
+                patch.object(server_app, "_broadcast_clients", broadcast),
+            ):
+                asyncio.run(
+                    server_app._route_whatsapp_outreach_reply(
+                        self.payload(),
+                        broadcast=True,
+                    )
+                )
+            broadcast.assert_not_awaited()
 
     def test_no_device_returns_503(
         self,

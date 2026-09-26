@@ -37,6 +37,7 @@ class EpisController extends ChangeNotifier {
   NcTraceRun? nightlyTrace;
   final Set<String> _inFlightRequests = <String>{};
   final Set<String> _approvalSubmitting = <String>{};
+  final Set<String> _externalReplyOutreachIds = <String>{};
   final Map<String, ChatMessage> _pendingUserMessages = {};
   String? _activeDayId;
   Completer<void>? _deviceRefreshCompleter;
@@ -114,6 +115,7 @@ class EpisController extends ChangeNotifier {
     nightlyTrace = null;
     _inFlightRequests.clear();
     _approvalSubmitting.clear();
+    _externalReplyOutreachIds.clear();
     _pendingUserMessages.clear();
     error = null;
     await Future.wait([_client.disconnect(), _deviceAgent.disconnect()]);
@@ -417,6 +419,37 @@ class EpisController extends ChangeNotifier {
     );
   }
 
+  void _handleExternalReply(Map<String, dynamic> payload) {
+    if (payload['provider'] != 'whatsapp') return;
+
+    final outreachId = payload['outreach_id'];
+    final content = payload['content'];
+    final receivedAt = payload['received_at'];
+    if (outreachId is! String ||
+        outreachId.trim().isEmpty ||
+        content is! String ||
+        content.trim().isEmpty ||
+        receivedAt is! String ||
+        receivedAt.trim().isEmpty ||
+        _externalReplyOutreachIds.contains(outreachId)) {
+      return;
+    }
+
+    _externalReplyOutreachIds.add(outreachId);
+    final rawName = payload['contact_name'];
+    final sender = rawName is String && rawName.trim().isNotEmpty
+        ? rawName.trim()
+        : 'Bir kişi';
+    _mergeCanonicalMessage(
+      ChatMessage(
+        role: ChatRole.assistant,
+        text: "$sender WhatsApp'tan cevap verdi:\n${content.trim()}",
+        messageId: 'external.reply:$outreachId',
+        createdAt: receivedAt,
+      ),
+    );
+  }
+
   void _handlePayload(Map<String, dynamic> payload) {
     switch (payload['type']) {
       case 'connected':
@@ -584,6 +617,10 @@ class EpisController extends ChangeNotifier {
             ),
           );
         }
+        break;
+
+      case 'external.reply':
+        _handleExternalReply(payload);
         break;
 
       case 'approval.accepted':

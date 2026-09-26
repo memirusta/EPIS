@@ -409,10 +409,8 @@ class AgentCore:
             pass
 
         if (
-            self.capability_broker.get(
-                "whatsapp_send_to_contact"
-            )
-            is not None
+            self.capability_broker.get("whatsapp_send_to_contact") is not None
+            or self.capability_broker.get("whatsapp_start_auto_conversation") is not None
         ):
             from .whatsapp_outreach import (
                 CoreWhatsappOutreachProvider,
@@ -2281,6 +2279,21 @@ class AgentCore:
             user_message,
         )
 
+        if spec.capability in {
+            "whatsapp.auto_conversation.start",
+            "whatsapp.auto_conversation.stop",
+        } and not authorization.authorized:
+            return AgentTurn("", [{
+                "ok": False,
+                "error": "explicit_current_turn_required",
+                "authorization_category": authorization.category,
+            }])
+        if (
+            spec.capability == "whatsapp.auto_conversation.start"
+            and len(user_message.strip()) > 2000
+        ):
+            return AgentTurn("", [{"ok": False, "error": "auto_conversation_goal_too_long"}])
+
         if authorization.denied and not confirmed:
             return AgentTurn(
                 "",
@@ -2371,10 +2384,15 @@ class AgentCore:
             )
 
         started_at = time.perf_counter()
+        dispatch_arguments = dict(call.arguments)
+        if spec.capability == "whatsapp.auto_conversation.start":
+            # The lease boundary is Emir's actual current instruction, not a
+            # model-expanded interpretation supplied as a tool argument.
+            dispatch_arguments["goal"] = user_message.strip()
         dispatched = (
             self.capability_broker.dispatch(
                 call.name,
-                call.arguments,
+                dispatch_arguments,
             )
         )
         result = dict(dispatched.result)
