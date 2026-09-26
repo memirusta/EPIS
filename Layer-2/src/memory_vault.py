@@ -283,7 +283,7 @@ class LocalMemoryVault:
                     status TEXT NOT NULL,
                     max_auto_replies INTEGER NOT NULL,
                     auto_reply_count INTEGER NOT NULL DEFAULT 0,
-                    expires_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL, -- empty means no time limit
                     initial_outreach_id TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -1160,8 +1160,8 @@ class LocalMemoryVault:
         return self._dec(row["canonical_name_enc"]).strip()[:256]
 
     def start_whatsapp_auto_conversation(
-        self, *, contact_ref: str, goal: str, duration_minutes: int = 30,
-        max_auto_replies: int = 10, initial_message: str = "",
+        self, *, contact_ref: str, goal: str, duration_minutes: int | None = None,
+        max_auto_replies: int = 0, initial_message: str = "",
     ) -> dict[str, Any]:
         resolved = self.resolve_contact_ref(contact_ref)
         if resolved.get("status") != "resolved":
@@ -1170,10 +1170,17 @@ class LocalMemoryVault:
         clean_initial = str(initial_message or "").strip()
         if not clean_goal or len(clean_goal) > 2000 or len(clean_initial) > 4000:
             return {"ok": False, "error": "invalid_auto_conversation_content"}
-        duration = max(1, min(120, int(duration_minutes)))
-        quota = max(1, min(30, int(max_auto_replies)))
+        duration = None if duration_minutes is None else max(1, min(120, int(duration_minutes)))
+        quota = int(max_auto_replies)
+        if quota < 0:
+            raise ValueError(
+                "max_auto_replies_must_be_nonnegative"
+            )
         now = _utc_now()
-        expires = (datetime.now(timezone.utc) + timedelta(minutes=duration)).isoformat()
+        expires = (
+            (datetime.now(timezone.utc) + timedelta(minutes=duration)).isoformat()
+            if duration is not None else ""
+        )
         session_id = uuid.uuid4().hex
         person_id = str(resolved["person_id"])
         with self._lock, self._connection() as conn:
@@ -1240,7 +1247,8 @@ class LocalMemoryVault:
             changed = conn.execute(
                 """UPDATE whatsapp_auto_conversations
                    SET status='active', initial_outreach_id=?, updated_at=?
-                   WHERE session_id=? AND person_id=? AND status='starting' AND expires_at>?""",
+                   WHERE session_id=? AND person_id=? AND status='starting'
+                     AND (expires_at='' OR expires_at>?)""",
                 (outreach_id, now, session_id, row["person_id"], now),
             ).rowcount
             if changed:
@@ -1300,7 +1308,7 @@ class LocalMemoryVault:
             if session is None:
                 return {"auto_reply_eligible": False}
             session_id = str(session["session_id"])
-            if str(session["expires_at"]) <= now:
+            if session["expires_at"] and str(session["expires_at"]) <= now:
                 conn.execute(
                     "UPDATE whatsapp_auto_conversations SET status='expired', updated_at=? WHERE session_id=?",
                     (now, session_id),
@@ -1322,7 +1330,14 @@ class LocalMemoryVault:
                 "SELECT COUNT(*) FROM whatsapp_auto_reply_attempts WHERE session_id=?",
                 (session_id,),
             ).fetchone()[0]
-            if int(reserved) >= int(session["max_auto_replies"]):
+            reply_limit = int(
+                session["max_auto_replies"]
+            )
+
+            if (
+                reply_limit > 0
+                and int(reserved) >= reply_limit
+            ):
                 conn.execute(
                     "UPDATE whatsapp_auto_conversations SET status='completed', updated_at=? WHERE session_id=?",
                     (now, session_id),
@@ -1378,7 +1393,7 @@ class LocalMemoryVault:
             ).fetchone()
             if row is None or row["state"] != "generation_started" or row["status"] != "active":
                 return {"ok": False, "error": "auto_reply_not_available"}
-            if str(row["expires_at"]) <= now:
+            if row["expires_at"] and str(row["expires_at"]) <= now:
                 conn.execute(
                     "UPDATE whatsapp_auto_conversations SET status='expired', updated_at=? WHERE session_id=?",
                     (now, session_id),
@@ -1441,9 +1456,16 @@ class LocalMemoryVault:
                 )
                 count = int(row["auto_reply_count"]) + 1
                 conn.execute(
-                    """UPDATE whatsapp_auto_conversations SET auto_reply_count=?,
-                       status=CASE WHEN ? >= max_auto_replies THEN 'completed' ELSE status END,
-                       updated_at=? WHERE session_id=?""",
+                    """UPDATE whatsapp_auto_conversations
+                       SET auto_reply_count=?,
+                           status=CASE
+                               WHEN max_auto_replies > 0
+                                    AND ? >= max_auto_replies
+                               THEN 'completed'
+                               ELSE status
+                           END,
+                           updated_at=?
+                       WHERE session_id=?""",
                     (count, count, now, row["session_id"]),
                 )
             else:

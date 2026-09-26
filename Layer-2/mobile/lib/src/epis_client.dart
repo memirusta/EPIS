@@ -179,12 +179,13 @@ class EpisClient {
     return ok ? requestId : null;
   }
 
-  String? confirmApproval(String id) {
+  String? confirmApproval(String id, {bool whatsappAutoStart = false, int? durationMinutes}) {
     final operationId = _nextId('approval');
     final ok = send({
       'type': 'approval.confirm',
       'approval_id': id,
       'operation_id': operationId,
+      if (whatsappAutoStart) 'duration_minutes': durationMinutes,
     });
     return ok ? operationId : null;
   }

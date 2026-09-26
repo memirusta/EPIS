@@ -16,6 +16,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final _scroll = ScrollController();
   int _lastMessageCount = 0;
   String? _lastApprovalId;
+  int? _approvalDurationMinutes;
   bool _nearBottom = true;
 
   @override
@@ -39,6 +40,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final approvalId = controller.approval?.id;
     final newMessage = messageCount > _lastMessageCount;
     final newApproval = approvalId != null && approvalId != _lastApprovalId;
+    if (newApproval) _approvalDurationMinutes = null;
     final userJustSent = newMessage &&
         controller.messages.isNotEmpty &&
         controller.messages.last.role == ChatRole.user;
@@ -242,6 +244,33 @@ class _ChatScreenState extends State<ChatScreen> {
                       color: Color(0xFF9A9CA5),
                     ),
                   ),
+                  if (c.approval!.whatsapp case final whatsapp?) ...[
+                    const SizedBox(height: 8),
+                    Text('Alıcı: ${whatsapp.contactName}'),
+                    if (whatsapp.kind == 'auto_start' && whatsapp.goal != null)
+                      Text('Amaç: ${whatsapp.goal}'),
+                    if (whatsapp.maxAutoReplies != null)
+                      Text('En fazla ${whatsapp.maxAutoReplies} otomatik cevap'),
+                    const SizedBox(height: 4),
+                    Text(whatsapp.message.isEmpty
+                        ? 'İlk mesaj gönderilmeyecek.'
+                        : 'Gönderilecek metin: ${whatsapp.message}'),
+                    if (whatsapp.kind == 'auto_start')
+                      DropdownButton<int?>(
+                        value: _approvalDurationMinutes,
+                        isExpanded: true,
+                        items: const [
+                          DropdownMenuItem<int?>(value: null, child: Text('Süresiz')),
+                          DropdownMenuItem<int?>(value: 15, child: Text('15 dakika')),
+                          DropdownMenuItem<int?>(value: 30, child: Text('30 dakika')),
+                          DropdownMenuItem<int?>(value: 60, child: Text('1 saat')),
+                          DropdownMenuItem<int?>(value: 120, child: Text('2 saat')),
+                        ],
+                        onChanged: (value) => setState(() {
+                          _approvalDurationMinutes = value;
+                        }),
+                      ),
+                  ],
                   Row(
                     mainAxisAlignment: MainAxisAlignment.end,
                     children: [
@@ -250,7 +279,9 @@ class _ChatScreenState extends State<ChatScreen> {
                         child: const Text('Hayır'),
                       ),
                       FilledButton(
-                        onPressed: c.confirmApproval,
+                        onPressed: () => c.confirmApproval(
+                          durationMinutes: _approvalDurationMinutes,
+                        ),
                         child: const Text('Evet'),
                       ),
                     ],

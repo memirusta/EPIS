@@ -305,6 +305,7 @@ class AgentCore:
                 "client_id": pending.client_id,
                 "origin_device_id": pending.origin_device_id,
                 "expires_at": pending.expires_at,
+                "tool": pending.tool_call.name,
             }
 
     def active_turns(self) -> list[dict[str, Any]]:
@@ -548,6 +549,16 @@ class AgentCore:
         user_message: str,
     ) -> str:
         """Ask Luna for approval-card copy; policy remains deterministic."""
+        if approval.get("capability") in {
+            "whatsapp.send_to_contact", "whatsapp.auto_conversation.start",
+        }:
+            from .whatsapp_outreach import _safe_contact_name
+
+            contact = _safe_contact_name((approval.get("arguments") or {}).get("contact_ref"))
+            if approval.get("capability") == "whatsapp.auto_conversation.start":
+                return f"{contact} ile otomatik WhatsApp konuşması başlatılsın mı?"
+            return f"{contact} kişisine WhatsApp mesajı gönderilsin mi?"
+
         payload = {
             "requested_by_user": user_message,
             "tool": approval.get("tool"),
@@ -1392,7 +1403,12 @@ class AgentCore:
         self,
         approval_id: str | None = None,
         client_id: str | None = None,
+        duration_minutes: int | None = None,
     ) -> AgentTurn:
+        if duration_minutes is not None and (
+            type(duration_minutes) is not int or not 1 <= duration_minutes <= 120
+        ):
+            return AgentTurn("Geçersiz süre; 1–120 dakika seç veya süresiz bırak.", [])
         pending = self._take_pending(
             approval_id,
             client_id,
@@ -1438,6 +1454,14 @@ class AgentCore:
                 text,
                 pending.results,
             )
+
+        if pending.tool_call.name == "whatsapp_start_auto_conversation":
+            # Only the user-owned approval card may choose a duration. The
+            # model's optional tool argument is never authoritative.
+            if duration_minutes is None:
+                pending.tool_call.arguments.pop("duration_minutes", None)
+            else:
+                pending.tool_call.arguments["duration_minutes"] = duration_minutes
 
         try:
             entry = self.registry.get(
@@ -1963,6 +1987,39 @@ class AgentCore:
                         "client_id": client_id,
                         "origin_device_id": origin_device_id,
                     }
+                    if approval.get("capability") in {
+                        "whatsapp.send_to_contact", "whatsapp.auto_conversation.start",
+                    }:
+                        from .whatsapp_outreach import _safe_contact_name
+
+                        arguments = approval.get("arguments") or {}
+                        contact = _safe_contact_name(arguments.get("contact_ref"))
+                        approval_payload["whatsapp"] = {
+                            "kind": (
+                                "auto_start" if approval.get("capability")
+                                == "whatsapp.auto_conversation.start" else "send"
+                            ),
+                            "contact_name": contact,
+                            "message": str(arguments.get(
+                                "initial_message" if approval.get("capability")
+                                == "whatsapp.auto_conversation.start" else "message"
+                            ) or "")[:4000],
+                        }
+                        if approval_payload["whatsapp"]["kind"] == "auto_start":
+                            approval_payload["whatsapp"]["goal"] = user_message.strip()[:2000]
+                            quota = arguments.get(
+                                "max_auto_replies"
+                            )
+
+                            if (
+                                type(quota) is int
+                                and quota > 0
+                            ):
+                                approval_payload[
+                                    "whatsapp"
+                                ][
+                                    "max_auto_replies"
+                                ] = quota
 
                     return AgentTurn(
                         "",
@@ -2279,22 +2336,26 @@ class AgentCore:
             user_message,
         )
 
-        if spec.capability in {
-            "whatsapp.auto_conversation.start",
-            "whatsapp.auto_conversation.stop",
-        } and not authorization.authorized:
+        if spec.capability == "whatsapp.auto_conversation.stop" and not authorization.authorized:
             return AgentTurn("", [{
                 "ok": False,
                 "error": "explicit_current_turn_required",
                 "authorization_category": authorization.category,
             }])
+        if spec.capability in {
+            "whatsapp.send_to_contact", "whatsapp.auto_conversation.start",
+        }:
+            from .whatsapp_outreach import _safe_contact_name
+
+            if not _safe_contact_name(call.arguments.get("contact_ref")):
+                return AgentTurn("", [{"ok": False, "error": "safe_contact_name_required"}])
         if (
             spec.capability == "whatsapp.auto_conversation.start"
             and len(user_message.strip()) > 2000
         ):
             return AgentTurn("", [{"ok": False, "error": "auto_conversation_goal_too_long"}])
 
-        if authorization.denied and not confirmed:
+        if authorization.denied:
             return AgentTurn(
                 "",
                 [{
@@ -2307,7 +2368,12 @@ class AgentCore:
         if (
             decision.requires_confirmation
             and not confirmed
-            and not authorization.authorized
+            and (
+                spec.capability in {
+                    "whatsapp.send_to_contact", "whatsapp.auto_conversation.start",
+                }
+                or not authorization.authorized
+            )
         ):
             reason = decision.reason
             if authorization.source == "assistant_proposed":

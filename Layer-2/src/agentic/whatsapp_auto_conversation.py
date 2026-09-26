@@ -11,7 +11,6 @@ import json
 import re
 from typing import Any
 
-from .luna import OpenAILunaClient
 from .whatsapp_outreach import WHATSAPP_DEVICE_AUTO_SEND_CAPABILITY, _safe_contact_name
 
 
@@ -37,13 +36,9 @@ class WhatsAppAutoReplyCoordinator:
 
     @classmethod
     def from_core(cls, core: Any) -> "WhatsAppAutoReplyCoordinator":
-        current = core.luna
-        return cls(OpenAILunaClient(
-            model="gpt-6-luna",
-            base_url=getattr(current, "base_url", None),
-            api_key=getattr(current, "api_key", None),
-            usage_repository=getattr(core, "usage_repository", None),
-        ))
+        # The shared frontline Luna configuration is authoritative.
+        # tools=[] below still keeps this path text-only.
+        return cls(core.luna)
 
     @staticmethod
     def _context(device_result: dict[str, Any], content: str) -> dict[str, Any] | None:

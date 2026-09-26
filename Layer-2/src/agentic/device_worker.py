@@ -13,10 +13,8 @@ from agentic.devices import DeviceRegistry, LocalDeviceAgent
 from agentic.permissions import PermissionEngine
 from agentic.tools import build_local_registry
 from agentic.whatsapp_outreach import (
-    WHATSAPP_DEVICE_AUTO_STOP_CAPABILITY,
     WHATSAPP_DEVICE_CAPABILITIES,
     whatsapp_auto_stop_runtime_available,
-    whatsapp_device_runtime_available,
 )
 
 PROTOCOL_VERSION = 1
@@ -36,19 +34,16 @@ class DeviceWorker:
 
         # Phase 1D registers the hidden protocol contracts on both
         # cloud and device registries, but production must not
-        # advertise them until a real local WhatsApp bridge has
-        # explicitly configured the default controller.
+        # advertise them until private bridge credentials have configured
+        # a local controller. Connection may come up after this long-lived
+        # worker starts; each send checks live bridge health again.
         if (
             using_default_registry
-            and not whatsapp_device_runtime_available()
+            and not whatsapp_auto_stop_runtime_available()
         ):
             self.local.device.capabilities.difference_update(
                 WHATSAPP_DEVICE_CAPABILITIES
             )
-            if whatsapp_auto_stop_runtime_available():
-                self.local.device.capabilities.add(
-                    WHATSAPP_DEVICE_AUTO_STOP_CAPABILITY
-                )
 
         if allowed_capabilities is not None:
             self.local.device.capabilities.intersection_update(allowed_capabilities)

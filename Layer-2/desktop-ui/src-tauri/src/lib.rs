@@ -1,5 +1,7 @@
 mod server;
 mod startup;
+#[cfg(windows)]
+mod whatsapp_bridge;
 
 use server::LocalServer;
 use tauri::{
@@ -7,6 +9,8 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager,
 };
+#[cfg(windows)]
+use whatsapp_bridge::WhatsAppBridge;
 
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -20,10 +24,18 @@ fn show_main_window(app: &tauri::AppHandle) {
 pub fn run() {
     let start_in_background = std::env::args().any(|argument| argument == "--background");
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(LocalServer::default())
+        .manage(LocalServer::default());
+    #[cfg(windows)]
+    let builder = builder.manage(WhatsAppBridge::default());
+
+    builder
         .setup(move |app| {
+            #[cfg(windows)]
+            if let Err(error) = app.state::<WhatsAppBridge>().start(app.handle()) {
+                eprintln!("EPIS WhatsApp bridge watchdog could not start: {error}");
+            }
             let state = app.state::<LocalServer>();
             if let Err(error) = state.start(app.handle()) {
                 eprintln!("EPIS desktop runtime could not start: {error}");
@@ -41,6 +53,8 @@ pub fn run() {
                     "open" => show_main_window(app),
                     "quit" => {
                         app.state::<LocalServer>().stop();
+                        #[cfg(windows)]
+                        app.state::<WhatsAppBridge>().stop();
                         app.exit(0);
                     }
                     _ => {}
@@ -76,6 +90,8 @@ pub fn run() {
             }
             tauri::WindowEvent::Destroyed => {
                 window.app_handle().state::<LocalServer>().stop();
+                #[cfg(windows)]
+                window.app_handle().state::<WhatsAppBridge>().stop();
             }
             _ => {}
         })

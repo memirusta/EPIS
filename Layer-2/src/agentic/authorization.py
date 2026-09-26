@@ -230,6 +230,9 @@ class SessionAuthorizationPolicy:
                 for term
                 in cls._WHATSAPP_DENIAL_TERMS
             )
+            or any(term in text for term in (
+                "taslak", "draft", "ne yazabilirim", "what should i write",
+            ))
         )
 
     @classmethod

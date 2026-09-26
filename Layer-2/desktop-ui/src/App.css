@@ -514,6 +514,36 @@ button {
   line-height: 1.4;
 }
 
+.whatsapp-approval-details {
+  display: grid;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.whatsapp-approval-details pre {
+  max-height: 150px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 10px;
+}
+
+.whatsapp-approval-details label {
+  display: grid;
+  gap: 4px;
+  font-size: 10px;
+}
+
+.whatsapp-approval-details select {
+  max-width: 180px;
+  color: inherit;
+  background: #24232f;
+  border: 1px solid rgba(123, 104, 246, .4);
+  border-radius: 7px;
+  padding: 5px;
+}
+
 .permission-actions {
   display: flex;
   gap: 7px;

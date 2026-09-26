@@ -64,6 +64,13 @@ type ApprovalRequest = {
   tool?: string;
   capability?: string;
   risk?: string;
+  whatsapp?: {
+    kind: "send" | "auto_start";
+    contactName: string;
+    message: string;
+    goal?: string;
+    maxAutoReplies?: number;
+  };
 };
 
 type ServerConfig = {
@@ -211,6 +218,13 @@ function asApprovalRequest(value: unknown): ApprovalRequest | null {
   }
 
   const item = value as Record<string, unknown>;
+  const whatsappValue = item.whatsapp;
+  const whatsapp =
+    whatsappValue !== null &&
+    typeof whatsappValue === "object" &&
+    !Array.isArray(whatsappValue)
+      ? (whatsappValue as Record<string, unknown>)
+      : null;
 
   if (
     typeof item.id !== "string" ||
@@ -233,6 +247,22 @@ function asApprovalRequest(value: unknown): ApprovalRequest | null {
     capability:
       typeof item.capability === "string" ? item.capability : undefined,
     risk: typeof item.risk === "string" ? item.risk : undefined,
+    whatsapp:
+      whatsapp &&
+      (whatsapp.kind === "send" || whatsapp.kind === "auto_start") &&
+      typeof whatsapp.contact_name === "string" &&
+      typeof whatsapp.message === "string"
+        ? {
+            kind: whatsapp.kind,
+            contactName: whatsapp.contact_name,
+            message: whatsapp.message,
+            goal: typeof whatsapp.goal === "string" ? whatsapp.goal : undefined,
+            maxAutoReplies:
+              typeof whatsapp.max_auto_replies === "number"
+                ? whatsapp.max_auto_replies
+                : undefined,
+          }
+        : undefined,
   };
 }
 
@@ -933,6 +963,8 @@ export default function App() {
     useState<ApprovalRequest[]>([]);
   const [approvalSubmitting, setApprovalSubmitting] =
     useState<Set<string>>(() => new Set());
+  const [approvalDurations, setApprovalDurations] =
+    useState<Record<string, string>>({});
   const waiting = inFlightRequests.size > 0;
   const [usage, setUsage] = useState<UsageSnapshot | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
@@ -1750,6 +1782,11 @@ export default function App() {
         type: "approval.confirm",
         approval_id: approval.id,
         operation_id: operationId,
+        ...(approval.whatsapp?.kind === "auto_start"
+          ? { duration_minutes: approvalDurations[approval.id]
+              ? Number(approvalDurations[approval.id])
+              : null }
+          : {}),
       })
     ) {
       return;
@@ -2040,6 +2077,37 @@ export default function App() {
                         <strong>Onay gerekiyor</strong>
 
                         <span>{approval.message}</span>
+                        {approval.whatsapp && (
+                          <div className="whatsapp-approval-details">
+                            <span>Alıcı: {approval.whatsapp.contactName}</span>
+                            {approval.whatsapp.goal && approval.whatsapp.kind === "auto_start" && (
+                              <span>Amaç: {approval.whatsapp.goal}</span>
+                            )}
+                            {approval.whatsapp.maxAutoReplies && (
+                              <span>En fazla {approval.whatsapp.maxAutoReplies} otomatik cevap</span>
+                            )}
+                            <span>{approval.whatsapp.message ? "Gönderilecek metin:" : "İlk mesaj gönderilmeyecek."}</span>
+                            {approval.whatsapp.message && <pre>{approval.whatsapp.message}</pre>}
+                            {approval.whatsapp.kind === "auto_start" && (
+                              <label>
+                                Süre sınırı (isteğe bağlı)
+                                <select
+                                  value={approvalDurations[approval.id] ?? ""}
+                                  disabled={submitting}
+                                  onChange={(event) => setApprovalDurations((current) => ({
+                                    ...current, [approval.id]: event.target.value,
+                                  }))}
+                                >
+                                  <option value="">Süresiz</option>
+                                  <option value="15">15 dakika</option>
+                                  <option value="30">30 dakika</option>
+                                  <option value="60">1 saat</option>
+                                  <option value="120">2 saat</option>
+                                </select>
+                              </label>
+                            )}
+                          </div>
+                        )}
                       </div>
 
                       <div className="permission-actions">

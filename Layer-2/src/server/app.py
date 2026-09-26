@@ -1250,10 +1250,19 @@ async def _whatsapp_turn(data: dict[str, Any]) -> dict[str, Any]:
     pending_id = _whatsapp_pending.get(client_id)
     confirm_words = {"onayla", "evet onayla", "approve", "confirm"}
     reject_words = {"reddet", "hayir reddet", "hayır reddet", "reject", "cancel", "iptal"}
+    popup_only_tools = {"whatsapp_send_to_contact", "whatsapp_start_auto_conversation"}
+    popup_only_reply = "WhatsApp gönderimini yalnız EPIS Desktop veya mobil onay ekranından başlatabilirsin."
+    blocked_popup_only = False
 
     if pending_id and folded in confirm_words | reject_words:
-        function = core.confirm_pending if folded in confirm_words else core.reject_pending
-        turn = await run_core_call(function, pending_id, client_id)
+        metadata = core.pending_metadata(pending_id)
+        if metadata and metadata.get("tool") in popup_only_tools:
+            await run_core_call(core.reject_pending, pending_id, client_id)
+            blocked_popup_only = True
+            turn = None
+        else:
+            function = core.confirm_pending if folded in confirm_words else core.reject_pending
+            turn = await run_core_call(function, pending_id, client_id)
     else:
         turn = await run_core_call(
             core.handle,
@@ -1268,13 +1277,21 @@ async def _whatsapp_turn(data: dict[str, Any]) -> dict[str, Any]:
     approval_id = None
     if isinstance(approval, dict):
         approval_id = _valid_id(approval.get("id") or approval.get("approval_id"))
+        if approval.get("tool") in popup_only_tools and approval_id:
+            await run_core_call(core.reject_pending, approval_id, client_id)
+            blocked_popup_only = True
+
+    if blocked_popup_only:
+        confirmation_required = False
+        approval = None
+        approval_id = None
 
     if confirmation_required and approval_id:
         _whatsapp_pending[client_id] = approval_id
     else:
         _whatsapp_pending.pop(client_id, None)
 
-    reply = str(getattr(turn, "message", "") or "").strip()
+    reply = popup_only_reply if blocked_popup_only else str(getattr(turn, "message", "") or "").strip()
     if not reply and confirmation_required and isinstance(approval, dict):
         reply = str(approval.get("message") or "").strip()
     if confirmation_required and reply:
@@ -1854,6 +1871,7 @@ async def _process_approval(
     action: str,
     request_id: str,
     operation_id: str,
+    duration_minutes: int | None = None,
 ) -> None:
     core = get_core()
     try:
@@ -1862,11 +1880,10 @@ async def _process_approval(
             if action == "confirm"
             else core.reject_pending
         )
-        turn = await run_core_call(
-            function,
-            approval_id,
-            client_id,
-        )
+        if action == "confirm" and duration_minutes is not None:
+            turn = await run_core_call(function, approval_id, client_id, duration_minutes)
+        else:
+            turn = await run_core_call(function, approval_id, client_id)
     except Exception as exc:
         await _send_to_client(
             client_id,
@@ -2546,6 +2563,24 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     )
                     continue
 
+                is_auto_start = metadata.get("tool") == "whatsapp_start_auto_conversation"
+                has_duration = "duration_minutes" in message
+                duration_minutes = message.get("duration_minutes")
+                if (
+                    (has_duration and (action != "confirm" or not is_auto_start))
+                    or (has_duration and duration_minutes is not None and (
+                        type(duration_minutes) is not int
+                        or not 1 <= duration_minutes <= 120
+                    ))
+                ):
+                    await _send_to_client(client_id, {
+                        "type": "error", "operation_id": operation_id,
+                        "approval_id": approval_id,
+                        "error": "invalid_whatsapp_duration",
+                        "time": utc_now(),
+                    })
+                    continue
+
                 if not await _claim_request(
                     operation_id,
                     client_id,
@@ -2602,6 +2637,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                             original_request_id
                         ),
                         operation_id=operation_id,
+                        duration_minutes=duration_minutes if is_auto_start else None,
                     )
                 )
                 continue

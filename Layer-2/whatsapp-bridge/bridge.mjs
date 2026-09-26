@@ -192,6 +192,7 @@ const logger = pino({
 let sock = null
 let connected = false
 let reconnectTimer = null
+let pairingNoticeShown = false
 
 
 function safeEqual(left, right) {
@@ -745,20 +746,31 @@ async function connectWhatsApp() {
       qr,
     }) => {
       if (qr) {
-        console.log(
-          '\n[EPIS-WA] WhatsApp > Linked devices > Link a device\n',
-        )
+        if (process.env.EPIS_WHATSAPP_HEADLESS === '1') {
+          if (!pairingNoticeShown) {
+            pairingNoticeShown = true
 
-        qrcode.generate(
-          qr,
-          {
-            small: true,
-          },
-        )
+            console.error(
+              '[EPIS-WA] pairing_required: start the bridge interactively to scan the QR',
+            )
+          }
+        } else {
+          console.log(
+            '\n[EPIS-WA] WhatsApp > Linked devices > Link a device\n',
+          )
+
+          qrcode.generate(
+            qr,
+            {
+              small: true,
+            },
+          )
+        }
       }
 
       if (connection === 'open') {
         connected = true
+        pairingNoticeShown = false
 
         console.log(
           '[EPIS-WA] WhatsApp connected',
@@ -1497,13 +1509,13 @@ server.listen(
     console.log(
       `[EPIS-WA] Local bridge listening on http://${HOST}:${PORT}`,
     )
+    // Bind first: a second Desktop instance must never open another
+    // WhatsApp connection when the localhost port is already owned.
+    connectWhatsApp()
+      .catch(() => {
+        console.error(
+          '[EPIS-WA] Initial WhatsApp connection failed',
+        )
+      })
   },
 )
-
-
-connectWhatsApp()
-  .catch(() => {
-    console.error(
-      '[EPIS-WA] Initial WhatsApp connection failed',
-    )
-  })

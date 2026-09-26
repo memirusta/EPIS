@@ -136,6 +136,7 @@ class ApprovalRequest {
     this.tool,
     this.capability,
     this.risk,
+    this.whatsapp,
   });
 
   final String id;
@@ -146,6 +147,7 @@ class ApprovalRequest {
   final String? tool;
   final String? capability;
   final String? risk;
+  final WhatsAppApproval? whatsapp;
 
   static ApprovalRequest? tryParse(Object? value) {
     if (value is! Map) return null;
@@ -168,6 +170,43 @@ class ApprovalRequest {
           ? map['capability'] as String
           : null,
       risk: map['risk'] is String ? map['risk'] as String : null,
+      whatsapp: WhatsAppApproval.tryParse(map['whatsapp']),
+    );
+  }
+}
+
+class WhatsAppApproval {
+  const WhatsAppApproval({
+    required this.kind,
+    required this.contactName,
+    required this.message,
+    this.goal,
+    this.maxAutoReplies,
+  });
+
+  final String kind;
+  final String contactName;
+  final String message;
+  final String? goal;
+  final int? maxAutoReplies;
+
+  static WhatsAppApproval? tryParse(Object? value) {
+    if (value is! Map) return null;
+    final map = Map<String, dynamic>.from(value);
+    final kind = map['kind'];
+    if ((kind != 'send' && kind != 'auto_start') ||
+        map['contact_name'] is! String ||
+        map['message'] is! String) {
+      return null;
+    }
+    return WhatsAppApproval(
+      kind: kind as String,
+      contactName: map['contact_name'] as String,
+      message: map['message'] as String,
+      goal: map['goal'] is String ? map['goal'] as String : null,
+      maxAutoReplies: map['max_auto_replies'] is int
+          ? map['max_auto_replies'] as int
+          : null,
     );
   }
 }

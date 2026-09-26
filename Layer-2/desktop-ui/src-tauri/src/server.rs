@@ -669,6 +669,9 @@ fn copy_safe_device_environment(command: &mut Command) {
         "EPIS_SPOTIFY_REDIRECT_URI",
         "EPIS_KEY_PATH",
         "EPIS_MEMORY_VAULT_PATH",
+        "EPIS_WHATSAPP_BRIDGE_CONFIG",
+        "EPIS_WHATSAPP_BRIDGE_URL",
+        "EPIS_WHATSAPP_BRIDGE_TOKEN",
     ] {
         if let Some(value) = env::var_os(key) {
             command.env(key, value);

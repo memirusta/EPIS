@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run prepare:whatsapp-bridge && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -29,7 +29,13 @@
       "../../../Layer-1/identity/*.md": "Layer-1/identity/",
       "../../src/server/cloud_device_agent.py": "python/server/cloud_device_agent.py",
       "../../src/memory_vault.py": "python/memory_vault.py",
-      "../../src/crypto_layer.py": "python/crypto_layer.py"
+      "../../src/crypto_layer.py": "python/crypto_layer.py",
+      "../../src/agentic/whatsapp_auto_conversation.py": "python/agentic/whatsapp_auto_conversation.py",
+      "../../whatsapp-bridge/bridge.mjs": "whatsapp-bridge/bridge.mjs",
+      "../../whatsapp-bridge/policy.mjs": "whatsapp-bridge/policy.mjs",
+      "../../whatsapp-bridge/package.json": "whatsapp-bridge/package.json",
+      "../../whatsapp-bridge/node_modules/": "whatsapp-bridge/node_modules/",
+      "generated/whatsapp-node/node.exe": "whatsapp-bridge/runtime/node.exe"
     },
     "icon": [
       "icons/32x32.png",

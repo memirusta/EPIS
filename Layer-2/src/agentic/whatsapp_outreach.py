@@ -1383,12 +1383,28 @@ class WhatsappDeviceController:
         if not contact_ref or not goal:
             return {"ok": False, "error": "contact_and_goal_required"}
         try:
+            duration = arguments.get(
+                "duration_minutes"
+            )
+
+            reply_limit = arguments.get(
+                "max_auto_replies"
+            )
+
             started = self.state.vault.start_whatsapp_auto_conversation(
                 contact_ref=contact_ref,
                 goal=goal,
                 initial_message=initial,
-                duration_minutes=int(arguments.get("duration_minutes", 30)),
-                max_auto_replies=int(arguments.get("max_auto_replies", 10)),
+                duration_minutes=(
+                    None
+                    if duration is None
+                    else int(duration)
+                ),
+                max_auto_replies=(
+                    0
+                    if reply_limit is None
+                    else int(reply_limit)
+                ),
             )
         except (TypeError, ValueError):
             return {"ok": False, "error": "invalid_auto_conversation_limits"}
@@ -1944,7 +1960,6 @@ class CoreWhatsappOutreachProvider:
         for key in (
             "status",
             "outreach_id",
-            "person_id",
             "contact_name",
             "reply_tracking",
         ):

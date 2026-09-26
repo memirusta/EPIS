@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "prepare:whatsapp-bridge": "node scripts/prepare-whatsapp-bridge.mjs"
   },
   "dependencies": {
     "react": "^19.1.0",

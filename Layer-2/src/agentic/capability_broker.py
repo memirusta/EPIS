@@ -544,8 +544,11 @@ def default_capability_specs() -> list[CapabilitySpec]:
             "whatsapp_send_to_contact",
             (
                 "Send one WhatsApp message to a trusted resolved contact. "
-                "Use only when the user explicitly asks EPIS in the current "
-                "turn to contact that person. contact_ref is a human-facing "
+                "A natural request such as 'Merve'ye yaz' is enough to propose "
+                "this action, but it never sends before the user accepts the "
+                "approval popup showing the exact recipient and text. "
+                "Never use for drafts or a request not to send. "
+                "contact_ref is a human-facing "
                 "name or alias; the trusted provider resolves it deterministically. "
                 "Never invent phone numbers, JIDs or raw recipient identifiers."
             ),
@@ -576,18 +579,24 @@ def default_capability_specs() -> list[CapabilitySpec]:
         CapabilitySpec(
             "whatsapp_start_auto_conversation",
             (
-                "Start a temporary, bounded WhatsApp conversation with one trusted contact "
-                "only when Emir explicitly requests automatic replies to that named person "
-                "in the current turn. Provide the conversation goal and optionally the exact "
-                "first recipient-facing message. Never use for drafts or suggestions."
+                "Start a scoped WhatsApp conversation with one trusted contact "
+                "only after Emir confirms the exact recipient and first message in the "
+                "approval popup. Use for a requested ongoing conversation, not a one-off "
+                "message or a draft. The popup alone chooses any optional duration. "
+                "Set max_auto_replies only when the user explicitly requested a numeric "
+                "reply limit; otherwise omit it."
             ),
             _schema({
                 "contact_ref": {"type": "string", "maxLength": 200},
+                # Optional for model compatibility only. AgentCore
+                # overwrites the dispatched goal with Emir's actual
+                # current-turn instruction, so model-expanded scope is
+                # never authoritative.
                 "goal": {"type": "string", "maxLength": 2000},
                 "initial_message": {"type": "string", "maxLength": 4000},
                 "duration_minutes": {"type": "integer"},
                 "max_auto_replies": {"type": "integer"},
-            }, ("contact_ref", "goal")),
+            }, ("contact_ref",)),
             "whatsapp.auto_conversation.start", "whatsapp",
             risk_class=RiskClass.YELLOW.value,
             confirmation_required=True,

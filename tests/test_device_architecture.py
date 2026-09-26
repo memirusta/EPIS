@@ -17,6 +17,7 @@ from agentic.luna import LunaReply, ToolCall
 from agentic.tasks import TaskStore
 from agentic.tools import ToolRegistry, ToolSpec, build_local_registry, _open_url
 from agentic.transport import StdioDeviceAgent, worker_environment
+from agentic import whatsapp_outreach
 from test_agentic_core import build_core
 
 
@@ -91,6 +92,16 @@ class DeviceArchitectureTests(unittest.TestCase):
             expected_capabilities,
         )
         self.assertNotIn("codex.send", manifest["capabilities"])
+
+    def test_configured_bridge_capabilities_survive_initial_connection_delay(self):
+        # The Baileys connection may become ready after the persistent
+        # device worker has advertised its manifest to the cloud.
+        offline = whatsapp_outreach.UnavailableWhatsappDeviceController()
+        with patch.object(whatsapp_outreach, "_DEFAULT_WHATSAPP_DEVICE_CONTROLLER", offline):
+            worker = DeviceWorker()
+            capabilities = set(worker.handle({"version": 1, "operation": "describe"})["device"]["capabilities"])
+            self.assertTrue(whatsapp_outreach.WHATSAPP_DEVICE_CAPABILITIES <= capabilities)
+            self.assertFalse(offline.available())
 
     def test_child_environment_excludes_keys_and_python_injection(self):
         with patch.dict(os.environ, {"OPENAI_API_KEY": "secret", "LUNA_API_KEY": "secret",

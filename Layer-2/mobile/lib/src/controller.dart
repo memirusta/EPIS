@@ -184,11 +184,15 @@ class EpisController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void confirmApproval() {
+  void confirmApproval({int? durationMinutes}) {
     final current = approval;
     if (current == null || _approvalSubmitting.contains(current.id)) return;
 
-    final operationId = _client.confirmApproval(current.id);
+    final operationId = _client.confirmApproval(
+      current.id,
+      whatsappAutoStart: current.whatsapp?.kind == 'auto_start',
+      durationMinutes: durationMinutes,
+    );
     if (operationId == null) {
       error = 'Onay server bağlantısına yazılamadı.';
       notifyListeners();

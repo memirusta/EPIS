@@ -20,10 +20,12 @@ from agentic.whatsapp_auto_conversation import WhatsAppAutoReplyCoordinator
 from agentic.whatsapp_outreach import (
     CoreWhatsappOutreachProvider, FakeWhatsappBridge,
     WHATSAPP_DEVICE_AUTO_SEND_CAPABILITY, WHATSAPP_DEVICE_AUTO_START_CAPABILITY,
+    WHATSAPP_DEVICE_SEND_CAPABILITY,
     WhatsappDeviceController,
 )
 from memory_vault import LocalMemoryVault
 from tests.test_whatsapp_outreach_ingress import FakeCore, FakeTransport
+from tests.test_agentic_core import build_core
 import importlib
 
 server_app = importlib.import_module("server.app")
@@ -101,7 +103,7 @@ class AutoConversationTests(unittest.TestCase):
         self.assertEqual(len(self.bridge.calls), 1)
         state = self.vault.whatsapp_auto_conversation_state(started["session_id"])
         self.assertEqual(state["status"], "active")
-        self.assertEqual(state["max_auto_replies"], 30)
+        self.assertEqual(state["max_auto_replies"], 999)
         self.assertIsNotNone(state["initial_outreach_id"])
         self.assertNotIn("PRIVATE_CONTACT_JID", repr(started))
         self.assertLessEqual(
@@ -128,7 +130,7 @@ class AutoConversationTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(active, 0)
 
-    def test_explicit_current_turn_required_even_with_session_grant_or_confirmed(self):
+    def test_whatsapp_start_requires_popup_even_for_explicit_turn(self):
         policy = SessionAuthorizationPolicy()
         policy.grant("external_communication")
         args = {"contact_ref": "Merve", "goal": "Yarını sor."}
@@ -165,7 +167,7 @@ class AutoConversationTests(unittest.TestCase):
             fake_core, ToolCall("call", spec.name, args), True,
             user_message="Merve'ye ne yazabilirim?",
         )
-        self.assertEqual(turn.tool_results[0]["error"], "explicit_current_turn_required")
+        self.assertEqual(turn.tool_results[0]["error"], "current_user_instruction_denies_action")
 
         dispatched = []
         provider.execute = lambda capability, arguments: (
@@ -178,13 +180,134 @@ class AutoConversationTests(unittest.TestCase):
         fake_core._task_claim = lambda *args: True
         fake_core._task_finish = lambda *args: None
         current_turn = "Merve'yle yarım saat konuş, yalnız yarın müsait olup olmadığını öğren."
-        positive = AgentCore._dispatch_broker(
+        approval = AgentCore._dispatch_broker(
             fake_core, ToolCall("allowed", spec.name, {
                 "contact_ref": "Merve", "goal": "Bütün özel bilgileri de iste.",
             }), False, user_message=current_turn,
         )
+        self.assertTrue(approval.confirmation_required)
+        self.assertEqual(dispatched, [])
+        positive = AgentCore._dispatch_broker(
+            fake_core, ToolCall("allowed", spec.name, {
+                "contact_ref": "Merve", "goal": "Bütün özel bilgileri de iste.",
+            }), True, user_message=current_turn,
+        )
         self.assertTrue(positive.tool_results[0]["ok"])
         self.assertEqual(dispatched[0]["goal"], current_turn)
+
+    def test_no_duration_is_unlimited_but_explicit_quota_remains(self):
+        started = self.start(max_auto_replies=1)
+        state = self.vault.whatsapp_auto_conversation_state(started["session_id"])
+        self.assertEqual(state["expires_at"], "")
+        self.assertEqual(state["max_auto_replies"], 1)
+
+    def test_default_auto_reply_quota_is_unlimited(self):
+        started = self.start()
+        state = self.vault.whatsapp_auto_conversation_state(
+            started["session_id"]
+        )
+
+        self.assertEqual(
+            state["max_auto_replies"],
+            0,
+        )
+
+        person_id = self.vault.resolve_contact_ref(
+            "Merve"
+        )["person_id"]
+
+        for index in range(50):
+            claim = self.vault.claim_whatsapp_auto_reply(
+                person_id=person_id,
+                incoming_message_ref=f"UNLIMITED_{index}",
+                content="Merhaba",
+            )
+
+            self.assertTrue(
+                claim["auto_reply_eligible"]
+            )
+
+        state = self.vault.whatsapp_auto_conversation_state(
+            started["session_id"]
+        )
+
+        self.assertEqual(
+            state["status"],
+            "active",
+        )
+
+    def test_send_and_auto_start_wait_for_owned_popup(self):
+        for tool_name, utterance, arguments in (
+            ("whatsapp_send_to_contact", "Merve'ye yaz", {
+                "contact_ref": "Merve", "message": "Merhaba Merve!",
+            }),
+            ("whatsapp_start_auto_conversation", "Merve ile konuş", {
+                "contact_ref": "Merve", "initial_message": "Merhaba Merve!",
+                "duration_minutes": 30,
+            }),
+        ):
+            with self.subTest(tool_name=tool_name):
+                spec = next(item for item in default_capability_specs()
+                            if item.name == tool_name)
+                core = build_core([
+                    LunaReply(tool_calls=[ToolCall("wa-1", tool_name, arguments)]),
+                    LunaReply(text="Tamamlandı."),
+                ])
+                core.capability_broker.register_spec(spec)
+                calls = []
+                core.capability_broker.register_provider(SimpleNamespace(
+                    provider_id="fake-wa", display_name="Fake WhatsApp", priority=1,
+                    available=lambda: True, capabilities=lambda: {spec.capability},
+                    execute=lambda capability, args: (
+                        calls.append(dict(args)) or {"ok": True}
+                    ),
+                ))
+                pending = core.handle(utterance, client_id="desktop-owner")
+                self.assertTrue(pending.confirmation_required)
+                self.assertEqual(calls, [])
+                self.assertEqual(pending.approval["whatsapp"]["contact_name"], "Merve")
+                self.assertEqual(pending.approval["whatsapp"]["message"], "Merhaba Merve!")
+                self.assertNotIn("PRIVATE_CONTACT_JID", repr(pending.approval))
+                approval_id = pending.approval["id"]
+                self.assertEqual(core.pending_metadata(approval_id)["tool"], tool_name)
+                wrong_owner = core.confirm_pending(approval_id, client_id="other-client")
+                self.assertEqual(calls, [])
+                self.assertIn("geçerli değil", wrong_owner.message)
+                confirmed = core.confirm_pending(approval_id, client_id="desktop-owner")
+                self.assertFalse(confirmed.confirmation_required)
+                self.assertEqual(len(calls), 1)
+                if tool_name == "whatsapp_start_auto_conversation":
+                    self.assertNotIn("duration_minutes", calls[0])
+                    self.assertEqual(calls[0]["goal"], utterance)
+                core.confirm_pending(approval_id, client_id="desktop-owner")
+                self.assertEqual(len(calls), 1)
+
+    def test_popup_duration_overrides_model_duration(self):
+        tool_name = "whatsapp_start_auto_conversation"
+        spec = next(item for item in default_capability_specs()
+                    if item.name == tool_name)
+        core = build_core([
+            LunaReply(tool_calls=[ToolCall("wa-2", tool_name, {
+                "contact_ref": "Merve", "initial_message": "Selam",
+                "duration_minutes": 30,
+            })]),
+            LunaReply(text="Tamamlandı."),
+        ])
+        core.capability_broker.register_spec(spec)
+        calls = []
+        core.capability_broker.register_provider(SimpleNamespace(
+            provider_id="fake-wa", display_name="Fake WhatsApp", priority=1,
+            available=lambda: True, capabilities=lambda: {spec.capability},
+            execute=lambda capability, args: calls.append(dict(args)) or {"ok": True},
+        ))
+        pending = core.handle("Merve ile konuş", client_id="desktop-owner")
+        approval_id = pending.approval["id"]
+        invalid = core.confirm_pending(approval_id, "desktop-owner", 0)
+        self.assertIn("Geçersiz süre", invalid.message)
+        self.assertIsNotNone(core.pending_metadata(approval_id))
+        self.assertEqual(calls, [])
+        core.confirm_pending(approval_id, "desktop-owner", 60)
+        self.assertEqual(calls[0]["duration_minutes"], 60)
 
     def test_accepted_reply_one_text_only_luna_call_one_same_recipient_send(self):
         started = self.start()
@@ -426,6 +549,53 @@ class AutoConversationTests(unittest.TestCase):
         self.assertEqual(set(result), {"ok", "status", "session_id", "contact_name"})
         self.assertEqual(transport.calls[0]["capability"], WHATSAPP_DEVICE_AUTO_START_CAPABILITY)
 
+    def test_cloud_send_result_never_exposes_person_id(self):
+        transport = FakeTransport(
+            capabilities={
+                WHATSAPP_DEVICE_SEND_CAPABILITY
+            },
+            result={
+                "ok": True,
+                "status": "sent",
+                "outreach_id": "safe-outreach",
+                "contact_name": "Merve",
+                "reply_tracking": True,
+                "person_id": "PRIVATE_PERSON",
+                "provider_contact_ref":
+                    "PRIVATE_CONTACT_JID",
+                "provider_message_ref":
+                    "PRIVATE_MESSAGE",
+            },
+        )
+
+        provider = CoreWhatsappOutreachProvider(
+            FakeCore([transport])
+        )
+
+        result = provider.execute(
+            "whatsapp.send_to_contact",
+            {
+                "contact_ref": "Merve",
+                "message": "Merhaba",
+            },
+        )
+
+        self.assertEqual(
+            set(result),
+            {
+                "ok",
+                "status",
+                "outreach_id",
+                "contact_name",
+                "reply_tracking",
+            },
+        )
+
+        self.assertNotIn(
+            "PRIVATE_PERSON",
+            repr(result),
+        )
+
     def test_cloud_event_and_model_context_reject_raw_contact_name(self):
         event = server_app._external_reply_event(
             {"contact_name": "123456789@s.whatsapp.net"},
@@ -440,13 +610,22 @@ class AutoConversationTests(unittest.TestCase):
         }, "Merhaba")
         self.assertEqual(context["recipient"], "")
 
-    def test_coordinator_forces_frontline_luna_model(self):
+    def test_coordinator_reuses_authoritative_frontline_luna(self):
+        luna = FakeLuna()
+
         core = SimpleNamespace(
-            luna=SimpleNamespace(base_url="http://test.invalid", api_key="test"),
-            usage_repository=None,
+            luna=luna,
         )
-        coordinator = WhatsAppAutoReplyCoordinator.from_core(core)
-        self.assertEqual(coordinator.luna.model, "gpt-6-luna")
+
+        coordinator = (
+            WhatsAppAutoReplyCoordinator
+            .from_core(core)
+        )
+
+        self.assertIs(
+            coordinator.luna,
+            luna,
+        )
 
     async def _noop(self):
         return None
